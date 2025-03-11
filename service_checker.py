@@ -708,3 +708,75 @@ class ServiceChecker:
         """Check if baseline has been established for this endpoint"""
         baseline = self.get_rolling_baseline(endpoint)
         return baseline["has_data"]
+
+    def get_latency_stats(self, endpoint: str) -> Dict[str, Any]:
+        """
+        Calculate and return latency statistics for a given endpoint
+        
+        Args:
+            endpoint: The endpoint name (can be domain or domain:port format)
+            
+        Returns:
+            Dictionary with latency statistics:
+            {
+                'avg': float,  # Average latency in ms
+                'min': float,  # Minimum latency in ms
+                'max': float,  # Maximum latency in ms
+                'current': float,  # Most recent latency in ms
+                'samples': int,  # Number of samples used
+                'has_data': bool  # Whether any data was found
+            }
+        """
+        # Default return structure
+        stats = {
+            'avg': 0.0,
+            'min': 0.0,
+            'max': 0.0,
+            'current': 0.0,
+            'samples': 0,
+            'has_data': False
+        }
+        
+        # Find the latency data for this endpoint
+        latency_data = None
+        
+        # First, try direct endpoint name
+        for service, endpoints in self.latency_history.items():
+            if endpoint in endpoints:
+                latency_data = endpoints[endpoint]
+                break
+                
+        # If not found, try to find endpoint:port format
+        if not latency_data and ':' not in endpoint:
+            for service, endpoints in self.latency_history.items():
+                for ep in endpoints:
+                    if ep.startswith(endpoint + ':'):
+                        latency_data = endpoints[ep]
+                        break
+                if latency_data:
+                    break
+                    
+        # If still not found, try substring match
+        if not latency_data:
+            for service, endpoints in self.latency_history.items():
+                for ep in endpoints:
+                    if endpoint in ep:
+                        latency_data = endpoints[ep]
+                        break
+                if latency_data:
+                    break
+        
+        # If we found data, calculate statistics
+        if latency_data and len(latency_data) > 0:
+            # Extract latency values from (timestamp, latency) tuples
+            latencies = [point[1] for point in latency_data if isinstance(point, tuple) and len(point) >= 2]
+            
+            if latencies:
+                stats['avg'] = sum(latencies) / len(latencies)
+                stats['min'] = min(latencies)
+                stats['max'] = max(latencies)
+                stats['current'] = latencies[-1] if latencies else 0.0
+                stats['samples'] = len(latencies)
+                stats['has_data'] = True
+        
+        return stats
