@@ -1,5 +1,10 @@
 # Microsoft 365 & Azure Service Status Dashboard
 
+######## CURSOR AGENTIC WORKFLOW POC#####
+Created completely in Cursor using Claude Sonnet 3.5 and 3.7, not a single line of code has been manually inputted or edited.  Test project to see the state-of-the-art in LLM based agentic coding workflows.
+#########################################
+
+
 A Windows desktop application for monitoring Microsoft 365 and Azure service health and connectivity.
 
 ## Features
