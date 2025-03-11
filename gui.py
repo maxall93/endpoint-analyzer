@@ -8,13 +8,15 @@ import collections
 import json
 from pathlib import Path
 import traceback
+import copy
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, 
     QHBoxLayout, QLabel, QPushButton, QTableWidget, QTableWidgetItem,
     QHeaderView, QProgressBar, QSplitter, QTextEdit, QMessageBox, 
     QStatusBar, QSizePolicy, QScrollArea, QGroupBox, QGridLayout,
-    QFrame, QSpacerItem, QComboBox
+    QFrame, QSpacerItem, QComboBox, QDialog, QLineEdit, QCheckBox,
+    QFormLayout
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QSize
 from PyQt6.QtGui import QIcon, QPixmap, QColor, QPalette
@@ -28,11 +30,75 @@ import matplotlib.pyplot as plt
 
 from service_checker import ServiceChecker
 
+# Log management constants
+MAX_LOG_LINES = 100000  # Maximum lines per log file
+MAX_LOG_FOLDER_SIZE = 1024 * 1024 * 1024  # 1 GB in bytes
+LOG_CHECK_INTERVAL = 3600  # Check log size every hour
+
+def get_file_line_count(file_path):
+    """Count the number of lines in a file"""
+    try:
+        with open(file_path, 'r') as f:
+            return sum(1 for _ in f)
+    except Exception as e:
+        print(f"Error counting lines in {file_path}: {e}")
+        return 0
+
+def get_folder_size(folder_path):
+    """Calculate total size of files in a folder"""
+    total_size = 0
+    try:
+        for path in Path(folder_path).rglob('*'):
+            if path.is_file():
+                total_size += path.stat().st_size
+    except Exception as e:
+        print(f"Error calculating folder size: {e}")
+    return total_size
+
+def cleanup_old_logs(log_dir, max_size):
+    """Remove oldest log files until folder size is under max_size"""
+    try:
+        # Get all log files with their creation times
+        log_files = [(f, f.stat().st_ctime) for f in Path(log_dir).glob('*.log')]
+        log_files.sort(key=lambda x: x[1])  # Sort by creation time
+        
+        # Remove oldest files until under size limit
+        current_size = get_folder_size(log_dir)
+        while current_size > max_size and log_files:
+            oldest_file = log_files.pop(0)[0]
+            current_size -= oldest_file.stat().st_size
+            oldest_file.unlink()
+            print(f"Removed old log file: {oldest_file}")
+            
+    except Exception as e:
+        print(f"Error cleaning up old logs: {e}")
+
+def check_and_rotate_logs(current_log_file):
+    """Check if current log file needs rotation and create new one if needed"""
+    try:
+        if not current_log_file.exists():
+            return current_log_file
+            
+        line_count = get_file_line_count(current_log_file)
+        if line_count >= MAX_LOG_LINES:
+            # Create new log file
+            new_log_file = Path('logs') / f'gui_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
+            print(f"Rotating log file to: {new_log_file}")
+            return new_log_file
+    except Exception as e:
+        print(f"Error checking log rotation: {e}")
+    
+    return current_log_file
+
 # Setup logging
 log_dir = Path('logs')
 log_dir.mkdir(exist_ok=True)
 log_file = log_dir / f'gui_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
 
+# Clean up old logs before starting
+cleanup_old_logs(log_dir, MAX_LOG_FOLDER_SIZE)
+
+# Configure logging
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -44,6 +110,43 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 logger.info(f"Starting application, logging to {log_file}")
+
+# Create a timer for periodic log management
+class LogManager:
+    def __init__(self):
+        self.current_log_file = log_file
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.check_logs)
+        self.timer.start(LOG_CHECK_INTERVAL * 1000)  # Convert seconds to milliseconds
+        
+    def check_logs(self):
+        """Periodic check of log files"""
+        try:
+            # Check if current log needs rotation
+            new_log_file = check_and_rotate_logs(self.current_log_file)
+            if new_log_file != self.current_log_file:
+                # Update logging to use new file
+                for handler in logger.handlers[:]:
+                    if isinstance(handler, logging.FileHandler):
+                        handler.close()
+                        logger.removeHandler(handler)
+                logger.addHandler(logging.FileHandler(new_log_file))
+                self.current_log_file = new_log_file
+                logger.info(f"Switched to new log file: {new_log_file}")
+            
+            # Clean up old logs if folder is too large
+            cleanup_old_logs(log_dir, MAX_LOG_FOLDER_SIZE)
+            
+        except Exception as e:
+            print(f"Error in log management: {e}")
+            
+    def cleanup(self):
+        """Final cleanup of logs"""
+        cleanup_old_logs(log_dir, MAX_LOG_FOLDER_SIZE)
+        self.timer.stop()
+
+# Create log manager instance
+log_manager = LogManager()
 
 class MatplotlibCanvas(FigureCanvas):
     """Matplotlib canvas for embedding in PyQt6 application"""
@@ -147,6 +250,13 @@ class LatencyGraph(QWidget):
         
     def get_service_for_endpoint(self, endpoint_name):
         """Determine which service an endpoint belongs to"""
+        # Use the service_checker's method if available
+        if hasattr(self.service_checker, 'get_service_for_domain'):
+            service = self.service_checker.get_service_for_domain(endpoint_name)
+            if service:
+                return service
+                
+        # Fallback to hardcoded mapping if service_checker method not available or returns None
         endpoint_service_map = {
             'teams.microsoft.com': 'Microsoft Teams',
             'presence.teams.microsoft.com': 'Microsoft Teams',
@@ -503,6 +613,158 @@ class ServiceCheckerThread(QThread):
         self.wait()
 
 
+class AddEndpointDialog(QDialog):
+    """Dialog for adding a new service endpoint"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add New Endpoint")
+        self.setModal(True)
+        self.setup_ui()
+        
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        form_layout = QFormLayout()
+        
+        # Service Category
+        self.service_combo = QComboBox()
+        self.service_combo.addItems([
+            "Microsoft Teams",
+            "Exchange Online",
+            "SharePoint & OneDrive",
+            "Microsoft Graph",
+            "Other Services"
+        ])
+        form_layout.addRow("Service Category:", self.service_combo)
+        
+        # Domain/URL
+        self.domain_edit = QLineEdit()
+        self.domain_edit.setPlaceholderText("e.g., teams.microsoft.com")
+        form_layout.addRow("Domain/URL:", self.domain_edit)
+        
+        # Description
+        self.description_edit = QLineEdit()
+        self.description_edit.setPlaceholderText("Brief description of the endpoint")
+        form_layout.addRow("Description:", self.description_edit)
+        
+        # Protocol Configuration Group
+        protocol_group = QGroupBox("Protocol Configuration")
+        protocol_layout = QVBoxLayout()
+        
+        # Protocol checks
+        self.dns_check = QCheckBox("DNS Check")
+        self.dns_check.setChecked(True)
+        protocol_layout.addWidget(self.dns_check)
+        
+        self.https_check = QCheckBox("HTTPS (Port 443)")
+        self.https_check.setChecked(True)
+        protocol_layout.addWidget(self.https_check)
+        
+        self.http_check = QCheckBox("HTTP (Port 80)")
+        protocol_layout.addWidget(self.http_check)
+        
+        # Health Check Configuration
+        health_check_label = QLabel("Health Check Type:")
+        health_check_label.setStyleSheet("margin-top: 10px;")
+        protocol_layout.addWidget(health_check_label)
+        
+        self.health_check_combo = QComboBox()
+        self.health_check_combo.addItems([
+            "TCP Port Only",
+            "Full Protocol Check"
+        ])
+        protocol_layout.addWidget(self.health_check_combo)
+        
+        # Custom Port
+        custom_port_layout = QHBoxLayout()
+        self.custom_port_check = QCheckBox("Custom Port:")
+        self.custom_port_edit = QLineEdit()
+        self.custom_port_edit.setPlaceholderText("Port number")
+        self.custom_port_protocol = QComboBox()
+        self.custom_port_protocol.addItems(["TCP", "UDP", "SMTP", "SMTP-TLS", "IMAP", "POP3"])
+        custom_port_layout.addWidget(self.custom_port_check)
+        custom_port_layout.addWidget(self.custom_port_edit)
+        custom_port_layout.addWidget(self.custom_port_protocol)
+        protocol_layout.addLayout(custom_port_layout)
+        
+        protocol_group.setLayout(protocol_layout)
+        layout.addLayout(form_layout)
+        layout.addWidget(protocol_group)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        save_button = QPushButton("Save")
+        save_button.clicked.connect(self.accept)
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(save_button)
+        button_layout.addWidget(cancel_button)
+        layout.addLayout(button_layout)
+        
+    def get_endpoint_data(self):
+        """Get the endpoint data from the form"""
+        ports = []
+        checks = []
+        
+        # Add DNS check if enabled
+        if self.dns_check.isChecked():
+            checks.append({
+                "type": "DNS",
+                "enabled": True
+            })
+        
+        # Add HTTPS port and check if enabled
+        if self.https_check.isChecked():
+            ports.append({
+                "port": 443,
+                "protocol": "HTTPS"
+            })
+            if self.health_check_combo.currentText() == "Full Protocol Check":
+                checks.append({
+                    "type": "HTTPS",
+                    "enabled": True
+                })
+            
+        # Add HTTP port and check if enabled
+        if self.http_check.isChecked():
+            ports.append({
+                "port": 80,
+                "protocol": "HTTP"
+            })
+            if self.health_check_combo.currentText() == "Full Protocol Check":
+                checks.append({
+                    "type": "HTTP",
+                    "enabled": True
+                })
+            
+        # Add custom port if checked and valid
+        if self.custom_port_check.isChecked():
+            try:
+                port = int(self.custom_port_edit.text())
+                if 1 <= port <= 65535:
+                    protocol = self.custom_port_protocol.currentText()
+                    ports.append({
+                        "port": port,
+                        "protocol": protocol
+                    })
+                    # Add protocol check if selected
+                    if self.health_check_combo.currentText() == "Full Protocol Check":
+                        checks.append({
+                            "type": protocol,
+                            "enabled": True
+                        })
+            except ValueError:
+                pass
+        
+        return {
+            "service": self.service_combo.currentText(),
+            "endpoint": {
+                "domain": self.domain_edit.text(),
+                "description": self.description_edit.text(),
+                "ports": ports,
+                "checks": checks
+            }
+        }
+
 class DashboardWindow(QMainWindow):
     """Main application window"""
     def __init__(self):
@@ -530,7 +792,7 @@ class DashboardWindow(QMainWindow):
         self.setup_detailed_status_tab()
         self.setup_latency_trends_tab()
         
-        # Add refresh button in top right corner
+        # Add refresh button and add endpoint button in top right corner
         header_layout = QHBoxLayout()
         header_layout.addStretch()
         
@@ -542,24 +804,29 @@ class DashboardWindow(QMainWindow):
         self.time_interval_combo.setCurrentIndex(1)  # Default to 15 minutes
         self.time_interval_combo.currentIndexChanged.connect(self.update_time_interval)
         
+        # Add Endpoint button
+        add_endpoint_button = QPushButton("Add Endpoint")
+        add_endpoint_button.clicked.connect(self.show_add_endpoint_dialog)
+        
         # Refresh button
         refresh_button = QPushButton("Refresh")
         refresh_button.clicked.connect(self.refresh_data)
         
         header_layout.addWidget(time_interval_label)
         header_layout.addWidget(self.time_interval_combo)
+        header_layout.addWidget(add_endpoint_button)
         header_layout.addWidget(refresh_button)
         
         main_layout.insertLayout(0, header_layout)
         
         # Status bar
-        self.statusBar().showMessage("Ready")
+        self.statusBar().showMessage("Initializing...")
         
         # Setup update timer and thread first
         self.setup_checker_thread()
         
-        # Run initial checks to populate data after thread is started
-        self.initialize_data()
+        # Use QTimer to initialize data after UI is shown
+        QTimer.singleShot(100, self.initialize_data)
         
     def setup_dark_theme(self):
         """Set up dark theme for the application"""
@@ -707,10 +974,42 @@ class DashboardWindow(QMainWindow):
         detailed_layout = QVBoxLayout(detailed_tab)
         
         # Create table for detailed endpoint status
-        self.detailed_table = QTableWidget(0, 6)
-        self.detailed_table.setHorizontalHeaderLabels(['Status', 'Service', 'Endpoint', 'Protocol', 'Port', 'Error Details'])
-        self.detailed_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.detailed_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)  # Error details column
+        self.detailed_table = QTableWidget(0, 7)
+        self.detailed_table.setHorizontalHeaderLabels([
+            'Status', 
+            'Service', 
+            'Endpoint', 
+            'Protocol',
+            'Port',
+            'Check Type',
+            'Details'
+        ])
+        
+        # Make header interactive and movable
+        header = self.detailed_table.horizontalHeader()
+        header.setSectionsMovable(True)
+        header.setStretchLastSection(True)  # Last section (Details) stretches
+        
+        # Set default column widths and make them resizable
+        default_widths = {
+            0: 60,    # Status
+            1: 150,   # Service
+            2: 200,   # Endpoint
+            3: 80,    # Protocol
+            4: 60,    # Port
+            5: 150,   # Check Type
+            6: -1     # Details (-1 means stretch)
+        }
+        
+        for col, width in default_widths.items():
+            if width > 0:
+                self.detailed_table.setColumnWidth(col, width)
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+        
+        # Make the Details column stretch to fill remaining space
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
+        
+        # Other table properties
         self.detailed_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.detailed_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.detailed_table.verticalHeader().setVisible(False)
@@ -736,15 +1035,8 @@ class DashboardWindow(QMainWindow):
             scroll_contents = QWidget()
             scroll_layout = QGridLayout(scroll_contents)
             
-            # Define the core endpoints we want to monitor (all using HTTPS port 443)
-            self.core_endpoints = [
-                'teams.microsoft.com',
-                'presence.teams.microsoft.com',
-                'outlook.office365.com',
-                'sharepoint.com',
-                'graph.microsoft.com',
-                'login.microsoftonline.com'
-            ]
+            # Get endpoints from the service checker
+            self.core_endpoints = self.get_core_endpoints()
             
             # Create graph widgets for each core endpoint
             self.graph_widgets = {}
@@ -791,6 +1083,25 @@ class DashboardWindow(QMainWindow):
             error_layout.addWidget(error_label)
             self.tabs.addTab(error_tab, "Latency Trends")
             
+    def get_core_endpoints(self):
+        """Get the list of core endpoints from the service checker"""
+        endpoints = []
+        
+        # Check if service_checker has endpoints
+        if not hasattr(self.service_checker, 'endpoints') or not self.service_checker.endpoints:
+            logger.warning("No endpoints defined in service_checker")
+            return endpoints
+            
+        # Extract domains from each service category
+        for service_name, service_data in self.service_checker.endpoints.items():
+            for endpoint_data in service_data.get('endpoints', []):
+                domain = endpoint_data.get('domain', '')
+                if domain:
+                    endpoints.append(domain)
+                    
+        logger.info(f"Found {len(endpoints)} core endpoints")
+        return endpoints
+        
     def setup_checker_thread(self):
         """Set up the background thread for service checking"""
         self.checker_thread = ServiceCheckerThread(self.service_checker)
@@ -865,212 +1176,184 @@ class DashboardWindow(QMainWindow):
         unhealthy_rows = []
         healthy_rows = []
         
-        # First try the expected structure (endpoints with ports)
-        rows_added = False
-        
-        # Process results into row data
-        for service_name, service_data in results.items():
-            if not isinstance(service_data, dict):
-                logger.warning(f"Warning: Service data for {service_name} is not a dictionary")
-                continue
-                
-            logger.debug(f"Processing service: {service_name}, keys: {service_data.keys()}")
-            
-            # Check if the expected 'endpoints' structure exists
-            if 'endpoints' in service_data:
-                for endpoint_data in service_data.get('endpoints', []):
-                    if not isinstance(endpoint_data, dict):
-                        logger.warning(f"Warning: Endpoint data in {service_name} is not a dictionary")
-                        continue
-                        
-                    domain = endpoint_data.get('domain', '')
-                    logger.debug(f"  Processing endpoint: {domain}, keys: {endpoint_data.keys()}")
-                    
-                    for port_result in endpoint_data.get('ports', []):
-                        if not isinstance(port_result, dict):
-                            logger.warning(f"Warning: Port result for {domain} is not a dictionary")
-                            continue
-                            
-                        protocol = port_result.get('protocol', '')
-                        port = port_result.get('port', '')
-                        is_healthy = port_result.get('is_healthy', False)
-                        error = port_result.get('error', '')
-                        
-                        logger.debug(f"    Processing port: {port}/{protocol}, healthy: {is_healthy}")
-                        
-                        row_data = [
-                            is_healthy,  # Status icon is determined by this boolean
-                            service_name,
-                            domain,
-                            protocol,
-                            str(port),
-                            error
-                        ]
-                        
-                        if is_healthy:
-                            healthy_rows.append(row_data)
-                        else:
-                            unhealthy_rows.append(row_data)
-                        
-                rows_added = len(healthy_rows) > 0 or len(unhealthy_rows) > 0
-            
-            # Alternative format: Check for dns_checks, port_checks, http_checks
-            if not rows_added and all(k in service_data for k in ['dns_checks', 'port_checks', 'http_checks']):
-                logger.info(f"Trying alternative format for {service_name}")
-                
-                # Add DNS checks
+        try:
+            # Process results into row data
+            for service_name, service_data in results.items():
+                # Process DNS checks
                 for dns_check in service_data.get('dns_checks', []):
-                    endpoint = dns_check.get('endpoint', '')
+                    domain = dns_check.get('endpoint', '')
                     result = dns_check.get('result', {})
                     is_healthy = result.get('success', False)
+                    latency = result.get('response_time', 0)
                     error = result.get('error', '')
+                    
+                    check_info = self.get_check_type_info('DNS', {'DNS': True})
+                    detail_msg = self.format_detail_message(None, latency, error, is_healthy)
                     
                     row_data = [
                         is_healthy,
                         service_name,
-                        endpoint,
+                        domain,
                         'DNS',
-                        '53',
-                        error
+                        'N/A',
+                        check_info,
+                        detail_msg
                     ]
-                    
-                    logger.debug(f"  DNS check for {endpoint}: {is_healthy}")
                     
                     if is_healthy:
                         healthy_rows.append(row_data)
                     else:
                         unhealthy_rows.append(row_data)
                 
-                # Add port checks
+                # Process port checks
                 for port_check in service_data.get('port_checks', []):
                     endpoint = port_check.get('endpoint', '')
                     result = port_check.get('result', {})
                     is_healthy = result.get('success', False)
+                    latency = result.get('latency_ms', 0)
                     error = result.get('error', '')
                     
-                    # Extract port and protocol from endpoint
-                    try:
-                        domain, port_str = endpoint.split(':')
-                        protocol = 'TCP'  # Default
-                        
-                        # Try to determine protocol from port
-                        port_protocols = {
-                            '443': 'HTTPS',
-                            '80': 'HTTP',
-                            '25': 'SMTP',
-                            '587': 'SMTP-TLS',
-                            '993': 'IMAP',
-                            '995': 'POP3'
-                        }
-                        if port_str in port_protocols:
-                            protocol = port_protocols[port_str]
-                    except:
-                        domain = endpoint
-                        port_str = '0'
-                        protocol = 'Unknown'
+                    # Split endpoint into domain and port
+                    domain, port = endpoint.rsplit(':', 1) if ':' in endpoint else (endpoint, '')
+                    
+                    # Determine protocol based on port
+                    protocol = 'TCP'
+                    if port == '443':
+                        protocol = 'HTTPS'
+                    elif port == '80':
+                        protocol = 'HTTP'
+                    elif port == '587':
+                        protocol = 'SMTP-TLS'
+                    elif port == '993':
+                        protocol = 'IMAP'
+                    elif port == '995':
+                        protocol = 'POP3'
+                    
+                    check_info = self.get_check_type_info(protocol, {protocol: False})  # Port check only
+                    detail_msg = self.format_detail_message(None, latency, error, is_healthy)
                     
                     row_data = [
                         is_healthy,
                         service_name,
                         domain,
                         protocol,
-                        port_str,
-                        error
+                        port,
+                        check_info,
+                        detail_msg
                     ]
-                    
-                    logger.debug(f"  Port check for {endpoint}: {is_healthy}")
                     
                     if is_healthy:
                         healthy_rows.append(row_data)
                     else:
                         unhealthy_rows.append(row_data)
                 
-                # Add HTTP checks
+                # Process HTTP checks
                 for http_check in service_data.get('http_checks', []):
                     endpoint = http_check.get('endpoint', '')
                     result = http_check.get('result', {})
                     is_healthy = result.get('success', False)
+                    latency = result.get('latency_ms', 0)
                     error = result.get('error', '')
                     status_code = result.get('status_code', '')
                     
-                    if status_code:
-                        detail = f"Status: {status_code}"
-                        if error:
-                            detail += f", Error: {error}"
-                    else:
-                        detail = error
+                    # Extract protocol and domain
+                    protocol = 'HTTPS' if endpoint.startswith('https://') else 'HTTP'
+                    domain = endpoint.split('://')[-1].split('/')[0]
+                    port = '443' if protocol == 'HTTPS' else '80'
+                    
+                    check_info = self.get_check_type_info(protocol, {protocol: True})  # Full protocol check
+                    detail_msg = self.format_detail_message(status_code, latency, error, is_healthy)
                     
                     row_data = [
                         is_healthy,
                         service_name,
-                        endpoint,
-                        'HTTP',
-                        '80/443',
-                        detail
+                        domain,
+                        protocol,
+                        port,
+                        check_info,
+                        detail_msg
                     ]
-                    
-                    logger.debug(f"  HTTP check for {endpoint}: {is_healthy}")
                     
                     if is_healthy:
                         healthy_rows.append(row_data)
                     else:
                         unhealthy_rows.append(row_data)
         
-        # If no data found with either format, add test data
-        if len(healthy_rows) == 0 and len(unhealthy_rows) == 0:
-            logger.warning("No data extracted from results, adding test data")
-            test_results = self.create_test_results()
-            for service_name, service_data in test_results.items():
-                for endpoint_data in service_data.get('endpoints', []):
-                    domain = endpoint_data.get('domain', '')
-                    for port_result in endpoint_data.get('ports', []):
-                        protocol = port_result.get('protocol', '')
-                        port = port_result.get('port', '')
-                        is_healthy = port_result.get('is_healthy', False)
-                        error = port_result.get('error', '')
-                        
-                        row_data = [
-                            is_healthy,  # Status icon is determined by this boolean
-                            service_name,
-                            domain,
-                            protocol,
-                            str(port),
-                            error
-                        ]
-                        
-                        if is_healthy:
-                            healthy_rows.append(row_data)
-                        else:
-                            unhealthy_rows.append(row_data)
+        except Exception as e:
+            logger.error(f"Error updating detailed table: {str(e)}", exc_info=True)
         
-        # Add unhealthy rows first, then healthy ones
+        # Add all rows to table
         all_rows = unhealthy_rows + healthy_rows
         
-        logger.info(f"Total rows to display: {len(all_rows)} ({len(unhealthy_rows)} unhealthy, {len(healthy_rows)} healthy)")
-        
-        # Populate the table
         for row_data in all_rows:
             row_position = self.detailed_table.rowCount()
             self.detailed_table.insertRow(row_position)
             
-            # Status icon (green checkmark or red X)
+            # Status icon
             status_label = QLabel()
             status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            
-            if row_data[0]:  # is_healthy
-                status_label.setStyleSheet("background-color: #4CAF50; border-radius: 10px;")
-                status_label.setText("✓")
-            else:
-                status_label.setStyleSheet("background-color: #F44336; border-radius: 10px;")
-                status_label.setText("✗")
-                
+            status_label.setStyleSheet(
+                "background-color: #4CAF50; border-radius: 10px;" if row_data[0] 
+                else "background-color: #F44336; border-radius: 10px;"
+            )
+            status_label.setText("✓" if row_data[0] else "✗")
             self.detailed_table.setCellWidget(row_position, 0, status_label)
             
             # Other columns
             for col in range(1, len(row_data)):
-                self.detailed_table.setItem(row_position, col, QTableWidgetItem(str(row_data[col])))
-                
+                if col == 5:  # Check Type column
+                    check_type, icon, color, tooltip = row_data[col]
+                    check_label = QLabel(f"{icon} {check_type}")
+                    check_label.setStyleSheet(f"color: {color}; padding: 2px 6px;")
+                    check_label.setToolTip(tooltip)
+                    self.detailed_table.setCellWidget(row_position, col, check_label)
+                else:
+                    item = QTableWidgetItem(str(row_data[col]))
+                    if col == 6:  # Details column
+                        item.setToolTip(str(row_data[col]))
+                    self.detailed_table.setItem(row_position, col, item)
+        
         logger.info(f"Detailed table updated with {self.detailed_table.rowCount()} rows")
+
+    def get_check_type_info(self, protocol, check_types):
+        """Get the check type information tuple"""
+        check_type = "TCP Port Only"
+        check_icon = "🔌"
+        check_color = "#607D8B"
+        check_tooltip = "Basic TCP port connectivity check"
+        
+        if protocol in check_types and check_types[protocol]:
+            if protocol == "DNS":
+                check_type = "Full DNS Check"
+                check_icon = "🔍"
+                check_color = "#9C27B0"
+                check_tooltip = "Complete DNS resolution check including record validation"
+            elif protocol in ["HTTP", "HTTPS"]:
+                check_type = f"Full {protocol} Check"
+                check_icon = "🌐"
+                check_color = "#2196F3"
+                check_tooltip = f"Complete {protocol} request with response validation"
+            elif protocol == "SMTP":
+                check_type = "Full SMTP Check"
+                check_icon = "📧"
+                check_color = "#FF9800"
+                check_tooltip = "Complete SMTP connection and protocol check"
+        
+        return (check_type, check_icon, check_color, check_tooltip)
+
+    def format_detail_message(self, status_code, latency, error, is_healthy):
+        """Format the detail message for the table"""
+        detail_msg = []
+        if status_code:
+            detail_msg.append(f"Status: {status_code}")
+        if latency > 0:
+            detail_msg.append(f"Latency: {latency:.1f}ms")
+        if error:
+            detail_msg.append(f"Error: {error}")
+        elif is_healthy:
+            detail_msg.append("Check passed successfully")
+        
+        return " | ".join(detail_msg) or "No additional details"
     
     def update_latency_graphs(self):
         """Update all latency graphs"""
@@ -1157,10 +1440,25 @@ class DashboardWindow(QMainWindow):
         self.update_ui(results)
         
     def closeEvent(self, event):
-        """Handle window close event"""
-        # Stop the checker thread when closing
-        if hasattr(self, 'checker_thread'):
-            self.checker_thread.stop()
+        """Handle application close event"""
+        try:
+            # Clean up logs
+            if hasattr(self, 'log_manager'):
+                self.log_manager.cleanup()
+                logger.info("Log manager cleanup completed")
+            
+            # Perform any other cleanup
+            if hasattr(self, 'service_checker'):
+                logger.info("Stopping service checker")
+                # Add any necessary service checker cleanup here
+            
+            logger.info("Application shutting down")
+            
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
+            traceback.print_exc()
+            
+        # Accept the close event
         event.accept()
 
     def initialize_data(self):
@@ -1173,7 +1471,10 @@ class DashboardWindow(QMainWindow):
                 # Log warning about missing endpoints
                 logger.warning("Warning: No endpoints defined in service_checker")
             else:
-                logger.info(f"Found {len(self.service_checker.endpoints)} service endpoints defined")
+                # Count total endpoints across all services
+                endpoint_count = sum(len(service_data.get('endpoints', [])) 
+                                    for service_data in self.service_checker.endpoints.values())
+                logger.info(f"Found {len(self.service_checker.endpoints)} service categories with {endpoint_count} total endpoints")
             
             # Run initial service checks to populate data
             try:
@@ -1182,15 +1483,27 @@ class DashboardWindow(QMainWindow):
                     results = self.service_checker.run_service_checks()
                     logger.info(f"Service checks completed. Results: {len(results)} services")
                     
-                    # Wait up to 20 seconds for the checker thread to collect some real data
-                    wait_time = 0
-                    while wait_time < 20:
-                        if any(len(history) > 0 for history in self.service_checker.latency_history.values()):
-                            logger.info("Real latency data collected, proceeding with initialization")
-                            break
-                        time.sleep(1)
-                        wait_time += 1
-                        logger.info(f"Waiting for real data... {wait_time}s")
+                    # Check if latency_history is properly initialized
+                    if hasattr(self.service_checker, 'latency_history'):
+                        # Wait up to 20 seconds for the checker thread to collect some real data
+                        wait_time = 0
+                        while wait_time < 20:
+                            # Check if any service has any endpoint with data
+                            has_data = False
+                            for service_data in self.service_checker.latency_history.values():
+                                if isinstance(service_data, dict) and any(len(endpoint_data) > 0 for endpoint_data in service_data.values() if hasattr(endpoint_data, '__len__')):
+                                    has_data = True
+                                    break
+                            
+                            if has_data:
+                                logger.info("Real latency data collected, proceeding with initialization")
+                                break
+                                
+                            time.sleep(1)
+                            wait_time += 1
+                            logger.info(f"Waiting for real data... {wait_time}s")
+                    else:
+                        logger.warning("No latency_history attribute in service_checker")
                     
                     # Dump raw latency data structure after running checks
                     self.dump_latency_data()
@@ -1208,158 +1521,163 @@ class DashboardWindow(QMainWindow):
                     results = {}
             except Exception as e:
                 logger.error(f"Error running service checks: {str(e)}")
+                traceback.print_exc()  # Print the full traceback for debugging
                 results = {}
                 
         except Exception as e:
             logger.error(f"Critical error initializing data: {str(e)}")
+            traceback.print_exc()  # Print the full traceback for debugging
             # Only add test data in case of critical error
             self.add_test_data()
             
     def normalize_latency_data(self):
-        """Normalize the latency data format to be compatible with our display code"""
+        """Normalize latency data format for compatibility with display code"""
         if not hasattr(self.service_checker, 'latency_history'):
-            logger.warning("service_checker has no latency_history attribute to normalize")
+            logger.warning("No latency_history attribute in service_checker")
             return
             
         logger.info("Normalizing latency data format...")
         
-        try:
-            # Create a copy of the original data structure
-            original_data = self.service_checker.latency_history.copy()
-            normalized_data = {}
+        # Create a copy of the original structure to avoid modifying during iteration
+        original_structure = copy.deepcopy(self.service_checker.latency_history)
+        
+        # Process each service
+        for service_name, endpoints in original_structure.items():
+            logger.debug(f"Processing service: {service_name}")
             
-            # Map to translate endpoint formats
-            domain_map = {}
-            
-            # Process each key in the original data
-            for key, value in original_data.items():
-                # Check if key is in "domain:port" format
-                if isinstance(key, str) and ':' in key:
-                    try:
-                        # Extract domain and port
-                        domain, port = key.split(':')
-                        protocol = 'HTTPS' if port == '443' else 'HTTP' if port == '80' else f"PORT_{port}"
-                        
-                        # Store the mapping
-                        domain_map[key] = domain
-                        
-                        # Create or update entry for this domain
-                        if domain not in normalized_data:
-                            normalized_data[domain] = {}
-                            
-                        # Add the data under the protocol key
-                        protocol_key = f"{protocol}_{port}"
-                        normalized_data[domain][protocol_key] = value
-                        logger.info(f"Normalized {key} -> {domain} / {protocol_key}")
-                    except Exception as e:
-                        logger.warning(f"Error normalizing key {key}: {e}")
-                        # Keep the original key
-                        normalized_data[key] = value
-                else:
-                    # Not in domain:port format, keep as is
-                    normalized_data[key] = value
-            
-            # Update the service_checker with the normalized data
-            self.service_checker.latency_history = normalized_data
-            
-            # Store the domain map for future reference
-            self.service_checker.domain_map = domain_map
-            
-            logger.info(f"Latency data normalized. New keys: {list(normalized_data.keys())}")
-        except Exception as e:
-            logger.error(f"Error normalizing latency data: {e}", exc_info=True)
+            # Skip if not a dictionary
+            if not isinstance(endpoints, dict):
+                logger.warning(f"Unexpected data type for service {service_name}: {type(endpoints).__name__}, value: {endpoints}")
+                # Initialize as empty dict if not already a dict
+                self.service_checker.latency_history[service_name] = {}
+                continue
+                
+            # Process each endpoint
+            for endpoint_key, data in endpoints.items():
+                logger.debug(f"Processing endpoint: {endpoint_key}")
+                
+                # Skip if empty or not iterable
+                if not data or not hasattr(data, '__iter__'):
+                    logger.debug(f"Empty or non-iterable data for {endpoint_key}: {type(data).__name__}")
+                    continue
+                
+                try:
+                    # Convert data to list for inspection
+                    data_list = list(data)
+                    
+                    # Skip if empty after conversion
+                    if not data_list:
+                        logger.debug(f"Empty data list for {endpoint_key}")
+                        continue
+                    
+                    # Check if data is already in the correct format
+                    if isinstance(data, collections.deque) and all(
+                        isinstance(item, tuple) and len(item) >= 2 and 
+                        isinstance(item[0], datetime) and isinstance(item[1], (int, float))
+                        for item in data_list
+                    ):
+                        logger.debug(f"Data for {endpoint_key} is already in correct format")
+                        continue
+                    
+                    # Convert to the correct format if needed
+                    normalized_data = collections.deque(maxlen=240)
+                    now = datetime.now()
+                    
+                    # Handle different data formats
+                    if all(isinstance(item, (int, float)) for item in data_list):
+                        # Raw values without timestamps
+                        logger.info(f"Converting raw values to (timestamp, value) format for {endpoint_key}")
+                        for i, value in enumerate(reversed(data_list)):
+                            timestamp = now - timedelta(seconds=i * 15)
+                            normalized_data.appendleft((timestamp, float(value)))
+                    elif all(isinstance(item, tuple) and len(item) >= 2 for item in data_list):
+                        # Tuples that might need timestamp conversion
+                        logger.info(f"Converting tuple format for {endpoint_key}")
+                        for item in data_list:
+                            timestamp = item[0] if isinstance(item[0], datetime) else now
+                            value = float(item[1]) if isinstance(item[1], (int, float)) else 0.0
+                            normalized_data.append((timestamp, value))
+                    else:
+                        # Unknown format - log and skip
+                        logger.warning(f"Unknown data format for {endpoint_key}: {data_list[:3]}")
+                        continue
+                    
+                    # Replace the data with normalized format
+                    self.service_checker.latency_history[service_name][endpoint_key] = normalized_data
+                    logger.debug(f"Converted {len(normalized_data)} data points for {endpoint_key}")
+                    
+                except Exception as e:
+                    logger.error(f"Error normalizing data for {endpoint_key}: {str(e)}")
+                    logger.error(f"Data type: {type(data).__name__}, Sample: {str(data)[:100]}")
+                    traceback.print_exc()
+        
+        logger.info("Latency data normalization complete")
             
     def dump_latency_data(self):
-        """Dump latency data structure to logs for debugging"""
-        logger.info("===== LATENCY DATA STRUCTURE DUMP =====")
-        
+        """Dump the latency data structure to the log for debugging"""
         if not hasattr(self.service_checker, 'latency_history'):
-            logger.warning("Service checker has no latency_history attribute")
+            logger.warning("No latency_history attribute in service_checker")
             return
             
-        if not self.service_checker.latency_history:
-            logger.warning("Service checker latency_history is empty")
-            return
-            
-        # First level: dump the structure summary
-        logger.info(f"Top-level keys in latency_history: {list(self.service_checker.latency_history.keys())}")
+        logger.info("Dumping latency_history structure:")
+        logger.info(f"Top-level keys (services): {list(self.service_checker.latency_history.keys())}")
         
-        # Second level: check each data type
-        for key, value in self.service_checker.latency_history.items():
-            logger.info(f"Key: {key} (Type: {type(key).__name__})")
+        # Get the core endpoints if available
+        key_endpoints = []
+        if hasattr(self, 'core_endpoints') and self.core_endpoints:
+            key_endpoints = self.core_endpoints
+        else:
+            # Try to extract endpoints from the service checker
+            if hasattr(self.service_checker, 'endpoints'):
+                for service_name, service_data in self.service_checker.endpoints.items():
+                    for endpoint_data in service_data.get('endpoints', []):
+                        domain = endpoint_data.get('domain', '')
+                        if domain:
+                            key_endpoints.append(domain)
+        
+        logger.info(f"Looking for data for {len(key_endpoints)} key endpoints")
+        
+        # Check for each service
+        for service_name in self.service_checker.latency_history:
+            logger.info(f"Service: {service_name}")
+            endpoints = self.service_checker.latency_history[service_name]
             
-            if isinstance(value, dict):
-                logger.info(f"  Contains {len(value)} nested keys: {list(value.keys())}")
+            if isinstance(endpoints, dict):
+                logger.info(f"  Endpoints: {list(endpoints.keys())}")
                 
-                # Sample a few nested values
-                for nested_key, nested_value in list(value.items())[:3]:  # Sample first 3
-                    logger.info(f"  Nested key: {nested_key} (Type: {type(nested_key).__name__})")
+                # Check a few sample endpoints
+                for endpoint_key in list(endpoints.keys())[:3]:  # Limit to first 3 for brevity
+                    data = endpoints[endpoint_key]
+                    logger.info(f"  Endpoint: {endpoint_key}")
                     
-                    # If it's a deque or list or similar collection
-                    if hasattr(nested_value, '__len__'):
-                        logger.info(f"    Contains {len(nested_value)} data points (Type: {type(nested_value).__name__})")
-                        
-                        # Sample data points to see structure
-                        if len(nested_value) > 0:
+                    if hasattr(data, '__len__'):
+                        logger.info(f"    Data points: {len(data)}")
+                        if len(data) > 0:
                             try:
-                                sample = list(nested_value)[0] if hasattr(nested_value, '__iter__') else nested_value[0]
-                                logger.info(f"    Sample data point: {sample} (Type: {type(sample).__name__})")
-                                
-                                # For tuples, check if it's (timestamp, value) format
-                                if isinstance(sample, (tuple, list)) and len(sample) >= 2:
-                                    logger.info(f"    Appears to be (timestamp, value) format: {sample[0]} -> {sample[1]}")
+                                samples = list(data)[:3] if hasattr(data, '__iter__') else data[:3]
+                                logger.info(f"    Sample data: {samples}")
                             except (IndexError, TypeError) as e:
                                 logger.warning(f"    Error sampling data: {e}")
                     else:
-                        logger.info(f"    Not a collection: {nested_value}")
-            elif hasattr(value, '__len__') and not isinstance(value, str):
-                # It's a collection but not a dict
-                logger.info(f"  Contains {len(value)} items (Type: {type(value).__name__})")
-                
-                # Sample data
-                if len(value) > 0:
-                    try:
-                        sample = list(value)[0] if hasattr(value, '__iter__') else value[0]
-                        logger.info(f"  Sample data point: {sample} (Type: {type(sample).__name__})")
-                    except (IndexError, TypeError) as e:
-                        logger.warning(f"  Error sampling data: {e}")
+                        logger.info(f"    Data type: {type(data).__name__}, value: {data}")
             else:
-                # It's a direct value
-                logger.info(f"  Direct value: {value} (Type: {type(value).__name__})")
+                logger.info(f"  Unexpected data type for endpoints: {type(endpoints).__name__}, value: {endpoints}")
         
-        # Log actual latency data samples for key endpoints
-        key_endpoints = [
-            'teams.microsoft.com',
-            'outlook.office365.com',
-            'login.microsoftonline.com',
-            'teams.microsoft.com:443',
-            'outlook.office365.com:443'
-        ]
-        
-        logger.info("===== LATENCY DATA SAMPLES FOR KEY ENDPOINTS =====")
-        
+        # Check for specific endpoints
         for endpoint in key_endpoints:
-            # Check if the endpoint exists directly
-            if endpoint in self.service_checker.latency_history:
-                data = self.service_checker.latency_history[endpoint]
-                logger.info(f"Found data for {endpoint} directly")
-                if hasattr(data, '__len__'):
-                    logger.info(f"  Contains {len(data)} data points")
-                    if len(data) > 0:
-                        try:
-                            samples = list(data)[:3] if hasattr(data, '__iter__') else data[:3]
-                            logger.info(f"  Samples: {samples}")
-                        except (IndexError, TypeError) as e:
-                            logger.warning(f"  Error sampling data: {e}")
-                continue
-                
-            # Check service names
+            # Check each service for this endpoint
             found = False
-            for service_name in self.service_checker.latency_history:
-                if isinstance(self.service_checker.latency_history[service_name], dict):
-                    if endpoint in self.service_checker.latency_history[service_name]:
-                        data = self.service_checker.latency_history[service_name][endpoint]
-                        logger.info(f"Found data for {endpoint} under service {service_name}")
+            for service_name, endpoints in self.service_checker.latency_history.items():
+                if not isinstance(endpoints, dict):
+                    logger.warning(f"  Service {service_name} has non-dict endpoints: {type(endpoints).__name__}")
+                    continue
+                    
+                # Look for exact or partial matches
+                for endpoint_key in endpoints:
+                    if endpoint in endpoint_key or endpoint_key in endpoint:
+                        data = endpoints[endpoint_key]
+                        logger.info(f"Found data for {endpoint} under service {service_name}, key: {endpoint_key}")
+                        
                         if hasattr(data, '__len__'):
                             logger.info(f"  Contains {len(data)} data points")
                             if len(data) > 0:
@@ -1368,80 +1686,64 @@ class DashboardWindow(QMainWindow):
                                     logger.info(f"  Samples: {samples}")
                                 except (IndexError, TypeError) as e:
                                     logger.warning(f"  Error sampling data: {e}")
+                        else:
+                            logger.info(f"  Data type: {type(data).__name__}, value: {data}")
+                        
                         found = True
                         break
+                
+                if found:
+                    break
             
             if not found:
                 logger.info(f"No data found for {endpoint}")
-        
-        # Test finding data with the LatencyGraph's method
-        logger.info("===== TESTING LATENCY DATA ACCESS WITH LatencyGraph =====")
-        test_endpoints = [
-            'teams.microsoft.com',
-            'outlook.office365.com',
-            'login.microsoftonline.com'
-        ]
-        
-        for endpoint in test_endpoints:
-            # Create a temporary graph object to test data access
-            temp_graph = LatencyGraph(None, self.service_checker, endpoint, auto_generate_test_data=False)
-            latency_data = temp_graph.find_latency_data()
-            
-            if latency_data:
-                logger.info(f"LatencyGraph.find_latency_data successfully found data for {endpoint}")
-                if hasattr(latency_data, '__len__'):
-                    logger.info(f"  Contains {len(latency_data)} data points")
-                    if len(latency_data) > 0:
-                        try:
-                            samples = list(latency_data)[:3] if hasattr(latency_data, '__iter__') else latency_data[:3]
-                            logger.info(f"  Samples: {samples}")
-                        except (IndexError, TypeError) as e:
-                            logger.warning(f"  Error sampling data: {e}")
-            else:
-                logger.warning(f"LatencyGraph.find_latency_data could not find data for {endpoint}")
-        
-        logger.info("===== END OF LATENCY DATA DUMP =====")
     
     def add_test_data(self):
         """Add test data for development purposes"""
         try:
-            logger.info("Adding test data for development...")
+            logger.info("Adding test data for development")
+            print("Adding test data...")
             
-            # Initialize latency_history if it doesn't exist
-            if not hasattr(self.service_checker, 'latency_history'):
-                logger.info("Creating new latency_history on service_checker")
-                self.service_checker.latency_history = {}
-                
-            # Define domain-to-service mapping
-            domain_service_map = {
-                'teams.microsoft.com': 'Microsoft Teams',
-                'presence.teams.microsoft.com': 'Microsoft Teams',
-                'outlook.office365.com': 'Exchange Online',
-                'sharepoint.com': 'SharePoint & OneDrive',
-                'graph.microsoft.com': 'Microsoft Graph',
-                'login.microsoftonline.com': 'Microsoft Authentication',
-            }
-                
-            # Add some test latency points for all core endpoints
+            # Get current time for test data
             current_time = datetime.now()
             
-            # Make sure core_endpoints is defined
-            if not hasattr(self, 'core_endpoints'):
-                self.core_endpoints = [
-                    'teams.microsoft.com',
-                    'presence.teams.microsoft.com',
-                    'outlook.office365.com',
-                    'sharepoint.com',
-                    'graph.microsoft.com',
-                    'login.microsoftonline.com'
-                ]
+            # Make sure we have core endpoints defined
+            if not hasattr(self, 'core_endpoints') or not self.core_endpoints:
+                logger.warning("No core endpoints defined, getting them from service checker")
+                self.core_endpoints = self.get_core_endpoints()
+                
+            if not self.core_endpoints:
+                logger.error("No endpoints available for test data")
+                return
+                
+            # Domain to service mapping for test data
+            domain_service_map = {}
             
             # Create test data for each endpoint
             for endpoint in self.core_endpoints:
                 logger.info(f"Creating test data for {endpoint}")
+                
+                # Get the service for this endpoint
+                service_name = None
+                if hasattr(self.service_checker, 'get_service_for_domain'):
+                    service_name = self.service_checker.get_service_for_domain(endpoint)
+                
+                if not service_name:
+                    # Fallback to inferring service name
+                    if 'teams' in endpoint:
+                        service_name = 'Microsoft Teams'
+                    elif 'outlook' in endpoint or 'office365' in endpoint:
+                        service_name = 'Exchange Online'
+                    elif 'sharepoint' in endpoint or 'onedrive' in endpoint:
+                        service_name = 'SharePoint & OneDrive'
+                    elif 'graph' in endpoint or 'login' in endpoint or 'microsoftonline' in endpoint:
+                        service_name = 'Microsoft Graph'
+                    else:
+                        service_name = 'Other Services'
+                
                 # Create or update the endpoint in latency_history
-                if endpoint not in self.service_checker.latency_history:
-                    self.service_checker.latency_history[endpoint] = {}
+                if service_name not in self.service_checker.latency_history:
+                    self.service_checker.latency_history[service_name] = {}
                 
                 # Generate test data points for the last 15 minutes
                 test_latency = []
@@ -1455,77 +1757,33 @@ class DashboardWindow(QMainWindow):
                 test_latency.insert(0, (current_time, 150))
                 
                 # Create a collections.deque for the test data
-                self.service_checker.latency_history[endpoint]['HTTPS_443'] = collections.deque(test_latency, maxlen=240)
+                endpoint_with_port = f"{endpoint}:443"
+                self.service_checker.latency_history[service_name][endpoint_with_port] = collections.deque(test_latency, maxlen=240)
+                
+                # Also add HTTP protocol data for endpoints that support it
+                if any(p in endpoint for p in ['teams', 'sharepoint', 'onedrive']):
+                    http_endpoint = f"{endpoint}:HTTP"
+                    self.service_checker.latency_history[service_name][http_endpoint] = collections.deque(test_latency, maxlen=240)
                 
                 logger.info(f"Added {len(test_latency)} test data points for {endpoint}")
                 
-                # Log the structure of the latency_history
-                logger.debug(f"latency_history structure: {self.service_checker.latency_history.keys()}")
-                for domain in self.service_checker.latency_history:
-                    logger.debug(f"  {domain} protocols: {self.service_checker.latency_history[domain].keys()}")
+                # Add to domain mapping
+                domain_service_map[endpoint] = service_name
+                
+            # Log the structure of the latency_history
+            logger.debug(f"latency_history structure: {self.service_checker.latency_history.keys()}")
+            for domain in self.service_checker.latency_history:
+                logger.debug(f"  {domain} protocols: {self.service_checker.latency_history[domain].keys()}")
             
             # Add domain mappings to ServiceChecker 
             # (needed because the checker stores data by domain but looks up by endpoint)
             if not hasattr(self.service_checker, 'domain_service_map'):
                 self.service_checker.domain_service_map = domain_service_map
-                
-            # Add some additional methods to service_checker if they don't exist
-            if not hasattr(self.service_checker, 'get_baseline_range'):
-                logger.info("Adding get_baseline_range method to service_checker")
-                def get_baseline_range(endpoint):
-                    """Simple stub for get_baseline_range"""
-                    logger.debug(f"get_baseline_range called for {endpoint}")
-                    history = self.service_checker.latency_history.get(endpoint, {}).get('HTTPS_443', [])
-                    if not history:
-                        logger.debug(f"No history found for {endpoint}")
-                        return 0, 0
-                    latencies = [l for _, l in history]
-                    if not latencies:
-                        logger.debug(f"No latencies found for {endpoint}")
-                        return 0, 0
-                    baseline_min = min(latencies) * 0.9
-                    baseline_max = max(latencies) * 1.1
-                    logger.debug(f"Baseline range for {endpoint}: {baseline_min:.2f}-{baseline_max:.2f}")
-                    return baseline_min, baseline_max
-                
-                self.service_checker.get_baseline_range = get_baseline_range
+            else:
+                # Update existing map
+                self.service_checker.domain_service_map.update(domain_service_map)
             
-            if not hasattr(self.service_checker, 'get_baseline_stability'):
-                logger.info("Adding get_baseline_stability method to service_checker")
-                def get_baseline_stability(endpoint):
-                    """Simple stub for get_baseline_stability"""
-                    logger.debug(f"get_baseline_stability called for {endpoint}")
-                    baseline_min, baseline_max = self.service_checker.get_baseline_range(endpoint)
-                    range_diff = baseline_max - baseline_min
-                    if range_diff > 120:
-                        return 'red'
-                    elif range_diff > 60:
-                        return 'orange'
-                    return 'green'
-                
-                self.service_checker.get_baseline_stability = get_baseline_stability
-            
-            if not hasattr(self.service_checker, 'has_alert'):
-                logger.info("Adding has_alert method to service_checker")
-                def has_alert(endpoint):
-                    """Simple stub for has_alert"""
-                    # 20% chance of alert for test data
-                    import random
-                    result = random.random() < 0.2
-                    logger.debug(f"has_alert called for {endpoint}, result: {result}")
-                    return result
-                
-                self.service_checker.has_alert = has_alert
-            
-            if not hasattr(self.service_checker, 'stability_thresholds'):
-                logger.info("Adding stability_thresholds to service_checker")
-                self.service_checker.stability_thresholds = {
-                    'green': 60,
-                    'orange': 120,
-                    'red': float('inf')
-                }
-            
-            # Create test result data for tables
+            # Create test results structure
             test_results = self.create_test_results()
             
             # Store these results in the service checker for consistency
@@ -1547,22 +1805,37 @@ class DashboardWindow(QMainWindow):
     
     def create_test_results(self):
         """Create test results data structure for development"""
-        # Create a data structure that exactly matches what service_checker.run_service_checks() returns
-        # This should match the format expected by update_detailed_table
-        
-        service_map = {
-            'teams.microsoft.com': 'Microsoft Teams',
-            'presence.teams.microsoft.com': 'Microsoft Teams',
-            'outlook.office365.com': 'Exchange Online',
-            'sharepoint.com': 'SharePoint & OneDrive',
-            'graph.microsoft.com': 'Microsoft Graph',
-            'login.microsoftonline.com': 'Microsoft Authentication'
-        }
-        
         test_results = {}
         
-        # Create entries for each service
-        for domain, service_name in service_map.items():
+        # Make sure we have core endpoints defined
+        if not hasattr(self, 'core_endpoints') or not self.core_endpoints:
+            logger.warning("No core endpoints defined, getting them from service checker")
+            self.core_endpoints = self.get_core_endpoints()
+            
+        if not self.core_endpoints:
+            logger.error("No endpoints available for test results")
+            return {}
+            
+        # Process each endpoint
+        for endpoint in self.core_endpoints:
+            # Get the service for this endpoint
+            service_name = None
+            if hasattr(self.service_checker, 'get_service_for_domain'):
+                service_name = self.service_checker.get_service_for_domain(endpoint)
+            
+            if not service_name:
+                # Fallback to inferring service name
+                if 'teams' in endpoint:
+                    service_name = 'Microsoft Teams'
+                elif 'outlook' in endpoint or 'office365' in endpoint:
+                    service_name = 'Exchange Online'
+                elif 'sharepoint' in endpoint or 'onedrive' in endpoint:
+                    service_name = 'SharePoint & OneDrive'
+                elif 'graph' in endpoint or 'login' in endpoint or 'microsoftonline' in endpoint:
+                    service_name = 'Microsoft Graph'
+                else:
+                    service_name = 'Other Services'
+            
             # Create service entry if it doesn't exist
             if service_name not in test_results:
                 test_results[service_name] = {
@@ -1571,7 +1844,7 @@ class DashboardWindow(QMainWindow):
             
             # Create endpoint data
             endpoint_data = {
-                'domain': domain,
+                'domain': endpoint,
                 'http_check': True,
                 'ports': []
             }
@@ -1587,7 +1860,7 @@ class DashboardWindow(QMainWindow):
             endpoint_data['ports'].append(https_port)
             
             # Add HTTP port for certain services
-            if domain in ['teams.microsoft.com', 'sharepoint.com']:
+            if any(p in endpoint for p in ['teams', 'sharepoint', 'onedrive']):
                 http_port = {
                     'port': 80,
                     'protocol': 'HTTP',
@@ -1598,7 +1871,7 @@ class DashboardWindow(QMainWindow):
                 endpoint_data['ports'].append(http_port)
             
             # Add an unhealthy SMTP port to Exchange Online for testing
-            if domain == 'outlook.office365.com':
+            if 'outlook.office365.com' in endpoint:
                 smtp_port = {
                     'port': 587,
                     'protocol': 'SMTP-TLS',
@@ -1611,4 +1884,69 @@ class DashboardWindow(QMainWindow):
             # Add endpoint to service
             test_results[service_name]['endpoints'].append(endpoint_data)
         
-        return test_results 
+        return test_results
+
+    def show_add_endpoint_dialog(self):
+        """Show the dialog for adding a new endpoint"""
+        dialog = AddEndpointDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.add_new_endpoint(dialog.get_endpoint_data())
+            
+    def add_new_endpoint(self, endpoint_data):
+        """Add a new endpoint to the endpoints.json file and refresh the UI"""
+        try:
+            # Load current endpoints
+            with open('endpoints.json', 'r') as f:
+                endpoints = json.load(f)
+                
+            # Get the service category
+            service = endpoint_data['service']
+            
+            # Create category if it doesn't exist
+            if 'categories' not in endpoints:
+                endpoints['categories'] = {}
+            if service not in endpoints['categories']:
+                endpoints['categories'][service] = {
+                    'description': f'Endpoints for {service}',
+                    'endpoints': []
+                }
+                
+            # Add the new endpoint
+            endpoints['categories'][service]['endpoints'].append(endpoint_data['endpoint'])
+            
+            # Save updated endpoints
+            with open('endpoints.json', 'w') as f:
+                json.dump(endpoints, f, indent=4)
+                
+            # Reload endpoints in service checker
+            self.service_checker.endpoints = self.service_checker.load_endpoints('endpoints.json')
+            
+            # Rebuild domain service map
+            self.service_checker.build_domain_service_map()
+            
+            # Initialize latency history for new endpoint
+            self.service_checker._initialize_latency_history()
+            
+            # Refresh the latency trends tab
+            self.refresh_latency_tab()
+            
+            # Show success message
+            QMessageBox.information(self, "Success", "New endpoint added successfully!")
+            
+        except Exception as e:
+            logger.error(f"Error adding new endpoint: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Failed to add endpoint: {str(e)}")
+            
+    def refresh_latency_tab(self):
+        """Refresh the latency trends tab with the new endpoint"""
+        # Remove existing latency tab
+        for i in range(self.tabs.count()):
+            if self.tabs.tabText(i) == "Latency Trends":
+                self.tabs.removeTab(i)
+                break
+                
+        # Recreate the latency trends tab
+        self.setup_latency_trends_tab()
+        
+        # Run service checks to start collecting data
+        self.refresh_data() 

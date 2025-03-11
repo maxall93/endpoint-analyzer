@@ -1,0 +1,164 @@
+{
+    "categories": {
+        "Microsoft Teams": {
+            "description": "Microsoft Teams communication and collaboration platform",
+            "endpoints": [
+                {
+                    "domain": "teams.microsoft.com",
+                    "description": "Main Teams service",
+                    "http_check": true,
+                    "category_type": "Teams",
+                    "ports": [
+                        {
+                            "port": 443,
+                            "protocol": "HTTPS",
+                            "description": "HTTPS traffic"
+                        },
+                        {
+                            "port": 80,
+                            "protocol": "HTTP",
+                            "description": "HTTP fallback"
+                        }
+                    ]
+                },
+                {
+                    "domain": "presence.teams.microsoft.com",
+                    "description": "Teams presence service",
+                    "http_check": true,
+                    "category_type": "Teams",
+                    "ports": [
+                        {
+                            "port": 443,
+                            "protocol": "HTTPS",
+                            "description": "HTTPS traffic"
+                        }
+                    ]
+                },
+                {
+                    "domain": "graph.microsoft.com",
+                    "description": "Microsoft Graph API",
+                    "http_check": true,
+                    "category_type": "API",
+                    "ports": [
+                        {
+                            "port": 443,
+                            "protocol": "HTTPS",
+                            "description": "HTTPS for Microsoft Graph API"
+                        }
+                    ]
+                },
+                {
+                    "domain": "login.microsoftonline.com",
+                    "description": "Microsoft authentication",
+                    "http_check": true,
+                    "category_type": "Authentication",
+                    "ports": [
+                        {
+                            "port": 443,
+                            "protocol": "HTTPS",
+                            "description": "HTTPS for Microsoft authentication"
+                        }
+                    ]
+                }
+            ]
+        },
+        "Exchange Online": {
+            "description": "Microsoft Exchange Online email and calendar services",
+            "endpoints": [
+                {
+                    "domain": "outlook.office365.com",
+                    "description": "Outlook Web Access",
+                    "http_check": true,
+                    "category_type": "Email",
+                    "ports": [
+                        {
+                            "port": 443,
+                            "protocol": "HTTPS",
+                            "description": "HTTPS for OWA"
+                        },
+                        {
+                            "port": 587,
+                            "protocol": "SMTP-TLS",
+                            "description": "SMTP submission (STARTTLS)"
+                        },
+                        {
+                            "port": 993,
+                            "protocol": "IMAP",
+                            "description": "IMAP4 over SSL"
+                        },
+                        {
+                            "port": 995,
+                            "protocol": "POP3",
+                            "description": "POP3 over SSL"
+                        }
+                    ]
+                }
+            ]
+        },
+        "SharePoint & OneDrive": {
+            "description": "Microsoft SharePoint and OneDrive file storage and collaboration",
+            "endpoints": [
+                {
+                    "domain": "sharepoint.com",
+                    "description": "SharePoint Online",
+                    "http_check": true,
+                    "category_type": "Storage",
+                    "ports": [
+                        {
+                            "port": 443,
+                            "protocol": "HTTPS",
+                            "description": "HTTPS traffic"
+                        },
+                        {
+                            "port": 80,
+                            "protocol": "HTTP",
+                            "description": "HTTP fallback/redirect"
+                        }
+                    ]
+                },
+                {
+                    "domain": "onedrive.com",
+                    "description": "OneDrive file storage",
+                    "http_check": true,
+                    "category_type": "Storage",
+                    "ports": [
+                        {
+                            "port": 443,
+                            "protocol": "HTTPS",
+                            "description": "HTTPS traffic"
+                        },
+                        {
+                            "port": 80,
+                            "protocol": "HTTP",
+                            "description": "HTTP fallback/redirect"
+                        }
+                    ]
+                }
+            ]
+        },
+        "Other Services": {
+            "description": "Endpoints for Other Services",
+            "endpoints": [
+                {
+                    "domain": "ibm.com",
+                    "description": "IBM",
+                    "http_check": true,
+                    "ports": [
+                        {
+                            "port": 443,
+                            "protocol": "HTTPS"
+                        },
+                        {
+                            "port": 80,
+                            "protocol": "HTTP"
+                        },
+                        {
+                            "port": 53,
+                            "protocol": "TCP"
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+}

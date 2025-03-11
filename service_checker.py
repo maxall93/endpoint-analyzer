@@ -10,86 +10,37 @@ from pathlib import Path
 import collections
 import copy
 import time
+import os
+import logging
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 class ServiceChecker:
-    def __init__(self):
-        # Define Microsoft 365 endpoints to test
-        self.endpoints = {
-            'Microsoft Teams': {
-                'endpoints': [
-                    {
-                        'domain': 'teams.microsoft.com',
-                        'http_check': True,
-                        'ports': [
-                            {'port': 443, 'protocol': 'HTTPS'},  # HTTPS traffic
-                            {'port': 80, 'protocol': 'HTTP'}     # HTTP fallback
-                        ]
-                    },
-                    {
-                        'domain': 'graph.microsoft.com',
-                        'http_check': True,
-                        'ports': [
-                            {'port': 443, 'protocol': 'HTTPS'}   # HTTPS for Microsoft Graph API
-                        ]
-                    },
-                    {
-                        'domain': 'login.microsoftonline.com',
-                        'http_check': True,
-                        'ports': [
-                            {'port': 443, 'protocol': 'HTTPS'}   # HTTPS for Microsoft authentication
-                        ]
-                    }
-                ]
-            },
-            'Exchange Online': {
-                'endpoints': [
-                    {
-                        'domain': 'outlook.office365.com',
-                        'http_check': True,
-                        'ports': [
-                            {'port': 443, 'protocol': 'HTTPS'},  # HTTPS for OWA
-                            {'port': 587, 'protocol': 'SMTP-TLS'},   # SMTP submission (STARTTLS)
-                            {'port': 993, 'protocol': 'IMAP'},   # IMAP4 over SSL
-                            {'port': 995, 'protocol': 'POP3'}    # POP3 over SSL
-                        ]
-                    }
-                ]
-            },
-            'SharePoint & OneDrive': {
-                'endpoints': [
-                    {
-                        'domain': 'sharepoint.com',
-                        'http_check': True,
-                        'ports': [
-                            {'port': 443, 'protocol': 'HTTPS'},  # HTTPS traffic
-                            {'port': 80, 'protocol': 'HTTP'}     # HTTP fallback/redirect
-                        ]
-                    },
-                    {
-                        'domain': 'onedrive.com',
-                        'http_check': True,
-                        'ports': [
-                            {'port': 443, 'protocol': 'HTTPS'},  # HTTPS traffic
-                            {'port': 80, 'protocol': 'HTTP'}     # HTTP fallback/redirect
-                        ]
-                    }
-                ]
-            }
-        }
+    def __init__(self, endpoints_file="endpoints.json"):
+        # Load endpoints from JSON file
+        self.endpoints = self.load_endpoints(endpoints_file)
+        
         self.results_history = []
         self.max_history = 3600  # Store up to 1 hour of results (at 15s intervals)
         self.last_results = {}
         
-        # Latency history tracking
-        self.latency_history = collections.defaultdict(lambda: collections.defaultdict(lambda: collections.deque(maxlen=240)))  # 60 minutes at 15s
+        # Initialize latency history tracking
+        self.latency_history = {}
+        self._initialize_latency_history()
         
         # Baseline latency tracking - changed to rolling window
-        self.baseline_window_minutes = 15  # Now use last 15 minutes for baseline (60 data points at 15s intervals)
+        self.baseline_window_minutes = 15
         
-        # Alert configuration
-        self.alert_data = {}  # Track alert data for each endpoint: {endpoint: {"last_values": deque, "alert_status": bool}}
-        self.alert_threshold_relative = (7, 10)  # Alert if 7 out of 10 most recent points exceed average max
-        self.alert_threshold_absolute = 250  # Alert if latency exceeds 250ms (absolute threshold)
+        # Alert tracking
+        self.alert_data = {}
+        self.alert_threshold_relative = (3, 5)  # Alert if 3 out of 5 values are above baseline max
+        self.alert_threshold_absolute = 250  # Alert if latency is above 250ms
+        self.alert_window_size = 5  # Number of data points to consider for alerting
+        
+        # Domain to service mapping for lookups
+        self.domain_service_map = {}
+        self.build_domain_service_map()
         
         # Stability thresholds for range difference
         self.stability_thresholds = {
@@ -97,6 +48,66 @@ class ServiceChecker:
             'orange': 120,  # 60-120ms difference is orange (stable but variable)
             'red': float('inf')  # >120ms difference is red (unstable)
         }
+
+    def load_endpoints(self, endpoints_file):
+        """Load endpoints from JSON file"""
+        try:
+            # Check if file exists
+            if not os.path.exists(endpoints_file):
+                logger.error(f"Endpoints file not found: {endpoints_file}")
+                return {}
+                
+            # Load JSON file
+            with open(endpoints_file, 'r') as f:
+                data = json.load(f)
+                
+            logger.info(f"Loaded endpoints from {endpoints_file}")
+            logger.debug(f"Endpoint categories: {list(data.get('categories', {}).keys())}")
+            
+            # Return the categories section which contains our endpoint structure
+            return data.get('categories', {})
+            
+        except Exception as e:
+            logger.error(f"Error loading endpoints from {endpoints_file}: {str(e)}")
+            return {}
+            
+    def build_domain_service_map(self):
+        """Build a mapping of domains to services for quick lookups"""
+        self.domain_service_map = {}
+        
+        for service_name, service_data in self.endpoints.items():
+            for endpoint in service_data.get('endpoints', []):
+                domain = endpoint.get('domain', '')
+                if domain:
+                    self.domain_service_map[domain] = service_name
+                    
+        logger.debug(f"Built domain service map with {len(self.domain_service_map)} entries")
+        
+    def get_service_for_domain(self, domain):
+        """Get the service name for a domain"""
+        # Direct lookup
+        if domain in self.domain_service_map:
+            return self.domain_service_map[domain]
+            
+        # Partial match
+        for key, service in self.domain_service_map.items():
+            if key in domain or domain in key:
+                return service
+                
+        # Try to infer service based on domain parts
+        if 'teams' in domain:
+            return 'Microsoft Teams'
+        elif 'outlook' in domain or 'exchange' in domain or 'office365' in domain:
+            return 'Exchange Online'
+        elif 'sharepoint' in domain or 'onedrive' in domain:
+            return 'SharePoint & OneDrive'
+        elif 'graph' in domain:
+            return 'Microsoft Graph'
+        elif 'login' in domain or 'microsoftonline' in domain:
+            return 'Microsoft Graph'  # Login endpoints are categorized under Graph
+            
+        # Default to unknown
+        return None
 
     def check_dns_resolution(self, domain: str) -> Dict[str, Any]:
         """Test DNS resolution for a domain"""
@@ -249,140 +260,123 @@ class ServiceChecker:
 
     def run_service_checks(self) -> Dict[str, Any]:
         """Run all service checks and return results"""
-        results = {}
         timestamp = datetime.now()
+        results = {}
         
-        # Microsoft Teams checks
-        results['Microsoft Teams'] = {
-            'dns_checks': [],
-            'port_checks': [],
-            'http_checks': []
-        }
-        
-        # DNS checks for Teams
-        for domain in ['teams.microsoft.com', 'presence.teams.microsoft.com']:
-            result = self.check_dns_resolution(domain)
-            results['Microsoft Teams']['dns_checks'].append({
-                'endpoint': domain,
-                'result': result
-            })
-        
-        # Port checks for Teams
-        for domain in ['teams.microsoft.com', 'presence.teams.microsoft.com']:
-            result = self.check_port(domain, 443, 'HTTPS')
-            endpoint = f"{domain}:443"
-            results['Microsoft Teams']['port_checks'].append({
-                'endpoint': endpoint,
-                'result': result
-            })
+        # Check if we have endpoints loaded
+        if not self.endpoints:
+            logger.error("No endpoints loaded. Cannot run service checks.")
+            return {}
             
-            # Store latency data for trending if successful
-            if result.get('success', False) and 'latency_ms' in result:
-                latency = result['latency_ms']
-                print(f"Recording latency for {endpoint}: {latency}ms")
-                self.latency_history['Microsoft Teams'][endpoint].append(
-                    (timestamp, latency)
-                )
+        logger.info(f"Running service checks for {len(self.endpoints)} services")
         
-        # Exchange Online checks
-        results['Exchange Online'] = {
-            'dns_checks': [],
-            'port_checks': [],
-            'http_checks': []
-        }
-        
-        # DNS checks for Exchange
-        for domain in ['outlook.office365.com', 'outlook.office.com', 'smtp.office365.com']:
-            result = self.check_dns_resolution(domain)
-            results['Exchange Online']['dns_checks'].append({
-                'endpoint': domain,
-                'result': result
-            })
-        
-        # Port checks for Exchange - include SMTP, IMAP, POP3 ports
-        for domain, ports in [
-            ('outlook.office365.com', [(443, 'HTTPS')]),
-            ('smtp.office365.com', [(25, 'SMTP'), (587, 'SMTP-TLS')])
-        ]:
-            for port, protocol in ports:
-                result = self.check_port(domain, port, protocol)
-                endpoint = f"{domain}:{port}"
-                results['Exchange Online']['port_checks'].append({
-                    'endpoint': endpoint,
-                    'result': result
+        # Process each service category
+        for service_name, service_data in self.endpoints.items():
+            logger.info(f"Checking service: {service_name}")
+            
+            # Initialize results for this service
+            results[service_name] = {
+                'dns_checks': [],
+                'port_checks': [],
+                'http_checks': []
+            }
+            
+            # Process each endpoint in this service
+            for endpoint_data in service_data.get('endpoints', []):
+                domain = endpoint_data.get('domain', '')
+                if not domain:
+                    logger.warning(f"Skipping endpoint with no domain in {service_name}")
+                    continue
+                    
+                logger.info(f"Checking endpoint: {domain}")
+                
+                # DNS resolution check
+                dns_result = self.check_dns_resolution(domain)
+                results[service_name]['dns_checks'].append({
+                    'endpoint': domain,
+                    'result': dns_result
                 })
                 
-                # Store latency data for trending if successful
-                if result.get('success', False) and 'latency_ms' in result:
-                    latency = result['latency_ms']
-                    print(f"Recording latency for {endpoint}: {latency}ms")
-                    self.latency_history['Exchange Online'][endpoint].append(
-                        (timestamp, latency)
-                    )
-        
-        # SharePoint & OneDrive checks
-        results['SharePoint & OneDrive'] = {
-            'dns_checks': [],
-            'port_checks': [],
-            'http_checks': []
-        }
-        
-        # DNS checks for SharePoint
-        for domain in ['sharepoint.com']:
-            result = self.check_dns_resolution(domain)
-            results['SharePoint & OneDrive']['dns_checks'].append({
-                'endpoint': domain,
-                'result': result
-            })
-        
-        # Port checks for SharePoint
-        for domain in ['sharepoint.com']:
-            result = self.check_port(domain, 443, 'HTTPS')
-            endpoint = f"{domain}:443"
-            results['SharePoint & OneDrive']['port_checks'].append({
-                'endpoint': endpoint,
-                'result': result
-            })
-            
-            # Store latency data for trending if successful
-            if result.get('success', False) and 'latency_ms' in result:
-                latency = result['latency_ms']
-                print(f"Recording latency for {endpoint}: {latency}ms")
-                self.latency_history['SharePoint & OneDrive'][endpoint].append(
-                    (timestamp, latency)
-                )
+                # Skip further checks if DNS resolution failed
+                if not dns_result.get('success', False):
+                    logger.warning(f"DNS resolution failed for {domain}, skipping further checks")
+                    continue
+                
+                # Port checks
+                for port_info in endpoint_data.get('ports', []):
+                    port = port_info.get('port', 0)
+                    protocol = port_info.get('protocol', '')
                     
-        # Microsoft Graph checks
-        results['Microsoft Graph'] = {
-            'dns_checks': [],
-            'port_checks': [],
-            'http_checks': []
-        }
-        
-        # DNS checks for Graph
-        for domain in ['graph.microsoft.com', 'login.microsoftonline.com']:
-            result = self.check_dns_resolution(domain)
-            results['Microsoft Graph']['dns_checks'].append({
-                'endpoint': domain,
-                'result': result
-            })
-        
-        # Port checks for Graph
-        for domain in ['graph.microsoft.com', 'login.microsoftonline.com']:
-            result = self.check_port(domain, 443, 'HTTPS')
-            endpoint = f"{domain}:443"
-            results['Microsoft Graph']['port_checks'].append({
-                'endpoint': endpoint,
-                'result': result
-            })
-            
-            # Store latency data for trending if successful
-            if result.get('success', False) and 'latency_ms' in result:
-                latency = result['latency_ms']
-                print(f"Recording latency for {endpoint}: {latency}ms")
-                self.latency_history['Microsoft Graph'][endpoint].append(
-                    (timestamp, latency)
-                )
+                    if not port or not protocol:
+                        logger.warning(f"Skipping port check with incomplete data: {port_info}")
+                        continue
+                        
+                    logger.info(f"Checking {protocol} port {port} on {domain}")
+                    
+                    # Run port check
+                    port_result = self.check_port(domain, port, protocol)
+                    endpoint_port = f"{domain}:{port}"
+                    results[service_name]['port_checks'].append({
+                        'endpoint': endpoint_port,
+                        'result': port_result
+                    })
+                    
+                    # Store latency data for trending if successful
+                    if port_result.get('success', False) and 'latency_ms' in port_result:
+                        latency = port_result['latency_ms']
+                        logger.debug(f"Recording latency for {endpoint_port}: {latency}ms")
+                        
+                        # Ensure the service and endpoint exist in latency_history
+                        if service_name not in self.latency_history:
+                            self.latency_history[service_name] = {}
+                        if endpoint_port not in self.latency_history[service_name]:
+                            self.latency_history[service_name][endpoint_port] = collections.deque(maxlen=240)
+                        
+                        # Add the latency data point
+                        self.latency_history[service_name][endpoint_port].append(
+                            (timestamp, float(latency))
+                        )
+                        
+                        # Update alert status
+                        self.update_alert_status(endpoint_port, latency)
+                
+                # HTTP endpoint check if specified
+                if endpoint_data.get('http_check', False):
+                    for port_info in endpoint_data.get('ports', []):
+                        protocol = port_info.get('protocol', '')
+                        
+                        # Only check HTTP/HTTPS protocols
+                        if protocol not in ['HTTP', 'HTTPS']:
+                            continue
+                            
+                        url = f"{protocol.lower()}://{domain}"
+                        logger.info(f"Checking HTTP endpoint: {url}")
+                        
+                        http_result = self.check_http_endpoint(url, protocol)
+                        results[service_name]['http_checks'].append({
+                            'endpoint': url,
+                            'result': http_result
+                        })
+                        
+                        # Store latency data for trending if successful
+                        if http_result.get('success', False) and 'latency_ms' in http_result:
+                            latency = http_result['latency_ms']
+                            logger.debug(f"Recording HTTP latency for {url}: {latency}ms")
+                            http_endpoint = f"{domain}:{protocol}"
+                            
+                            # Ensure the service and endpoint exist in latency_history
+                            if service_name not in self.latency_history:
+                                self.latency_history[service_name] = {}
+                            if http_endpoint not in self.latency_history[service_name]:
+                                self.latency_history[service_name][http_endpoint] = collections.deque(maxlen=240)
+                            
+                            # Add the latency data point
+                            self.latency_history[service_name][http_endpoint].append(
+                                (timestamp, float(latency))
+                            )
+                            
+                            # Update alert status
+                            self.update_alert_status(http_endpoint, latency)
         
         # Save results for history
         self._save_results(results)
@@ -544,18 +538,23 @@ class ServiceChecker:
         self.alert_data[endpoint]["above_count"] = above_count
         self.alert_data[endpoint]["high_latency_count"] = high_latency_count
         
-        # Determine if we should alert (N out of M above avg_max OR absolute threshold exceeded)
-        n_required, m_window = self.alert_threshold_relative
-        should_alert = (above_count >= n_required) or (high_latency_count >= 2)
+        # Determine if we should alert based on relative threshold (50% above baseline)
+        relative_alert = above_count >= 3  # Alert if 3 or more values are above avg_max
+        
+        # Determine if we should alert based on absolute threshold
+        absolute_alert = high_latency_count >= 2  # Alert if 2 or more values are above absolute threshold
+        
+        # Alert if either condition is met
+        should_alert = relative_alert or absolute_alert
         
         # Update and return alert status
         self.alert_data[endpoint]["alert_status"] = should_alert
         
         # Print diagnostic info for alerts
         if should_alert and not self.alert_data[endpoint].get("was_alerting", False):
-            if above_count >= n_required:
+            if relative_alert:
                 print(f"ALERT: {endpoint} has {above_count}/{len(self.alert_data[endpoint]['last_values'])} values above avg max")
-            if high_latency_count >= 2:
+            if absolute_alert:
                 print(f"HIGH LATENCY ALERT: {endpoint} has {high_latency_count} values above {self.alert_threshold_absolute}ms")
             self.alert_data[endpoint]["was_alerting"] = True
         elif not should_alert and self.alert_data[endpoint].get("was_alerting", False):
@@ -780,3 +779,37 @@ class ServiceChecker:
                 stats['has_data'] = True
         
         return stats
+
+    def _initialize_latency_history(self):
+        """Initialize the latency history structure for all services and endpoints"""
+        if not self.endpoints:
+            logger.warning("No endpoints loaded, latency history will be empty")
+            return
+            
+        # Initialize the structure for each service and endpoint
+        for service_name, service_data in self.endpoints.items():
+            self.latency_history[service_name] = {}
+            
+            # Process each endpoint in this service
+            for endpoint_data in service_data.get('endpoints', []):
+                domain = endpoint_data.get('domain', '')
+                if not domain:
+                    logger.warning(f"Skipping endpoint with no domain in {service_name}")
+                    continue
+                
+                # Initialize for each port
+                for port_info in endpoint_data.get('ports', []):
+                    port = port_info.get('port', 0)
+                    if port:
+                        endpoint_key = f"{domain}:{port}"
+                        self.latency_history[service_name][endpoint_key] = collections.deque(maxlen=240)
+                
+                # Initialize for HTTP endpoints if specified
+                if endpoint_data.get('http_check', False):
+                    for port_info in endpoint_data.get('ports', []):
+                        protocol = port_info.get('protocol', '')
+                        if protocol in ['HTTP', 'HTTPS']:
+                            http_endpoint = f"{domain}:{protocol}"
+                            self.latency_history[service_name][http_endpoint] = collections.deque(maxlen=240)
+        
+        logger.info(f"Initialized latency history for {len(self.latency_history)} services")
