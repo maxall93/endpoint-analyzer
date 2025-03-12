@@ -59,6 +59,23 @@
                             "description": "HTTPS for Microsoft authentication"
                         }
                     ]
+                },
+                {
+                    "domain": "reddit.com",
+                    "description": "Endpoint for reddit.com",
+                    "ports": [
+                        {
+                            "port": 443,
+                            "protocol": "HTTPS"
+                        }
+                    ],
+                    "checks": [
+                        {
+                            "type": "DNS",
+                            "enabled": true
+                        }
+                    ],
+                    "http_check": true
                 }
             ]
         },
@@ -155,6 +172,22 @@
                         {
                             "port": 53,
                             "protocol": "TCP"
+                        }
+                    ]
+                },
+                {
+                    "domain": "bbc.co.uk",
+                    "description": "BBC Website",
+                    "ports": [
+                        {
+                            "port": 443,
+                            "protocol": "HTTPS"
+                        }
+                    ],
+                    "checks": [
+                        {
+                            "type": "DNS",
+                            "enabled": true
                         }
                     ]
                 }
