@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QHeaderView, QProgressBar, QSplitter, QTextEdit, QMessageBox, 
     QStatusBar, QSizePolicy, QScrollArea, QGroupBox, QGridLayout,
     QFrame, QSpacerItem, QComboBox, QDialog, QLineEdit, QCheckBox,
-    QFormLayout, QSpinBox, QRadioButton, QButtonGroup
+    QFormLayout, QSpinBox, QRadioButton, QButtonGroup, QListWidget, QListWidgetItem
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QSize, QPropertyAnimation, QEasingCurve, QPoint
 from PyQt6.QtGui import QIcon, QPixmap, QColor, QPalette, QTransform, QPainter, QPen, QPolygon
@@ -909,6 +909,283 @@ class AddEndpointDialog(QDialog):
             }
         }
 
+class RemoveEndpointDialog(QDialog):
+    """Dialog for removing endpoints or specific ports from endpoints"""
+    
+    def __init__(self, endpoints_data, parent=None):
+        super().__init__(parent)
+        self.endpoints_data = endpoints_data
+        self.selected_category = None
+        self.selected_endpoint = None
+        self.selected_ports = []
+        self.remove_entire_endpoint = False
+        self.remove_entire_category = False
+        self.setup_ui()
+        
+    def setup_ui(self):
+        """Set up the dialog UI"""
+        self.setWindowTitle("Remove Endpoint")
+        self.setMinimumWidth(600)
+        self.setMinimumHeight(500)
+        
+        # Main layout
+        layout = QVBoxLayout(self)
+        
+        # Create a splitter for the two-panel layout
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        
+        # Left panel - Categories and Endpoints tree
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Category selection
+        category_group = QGroupBox("Categories")
+        category_layout = QVBoxLayout(category_group)
+        self.category_list = QListWidget()
+        self.category_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.category_list.currentItemChanged.connect(self.on_category_selected)
+        category_layout.addWidget(self.category_list)
+        
+        # Endpoint selection
+        endpoint_group = QGroupBox("Endpoints")
+        endpoint_layout = QVBoxLayout(endpoint_group)
+        self.endpoint_list = QListWidget()
+        self.endpoint_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.endpoint_list.currentItemChanged.connect(self.on_endpoint_selected)
+        endpoint_layout.addWidget(self.endpoint_list)
+        
+        # Add groups to left panel
+        left_layout.addWidget(category_group)
+        left_layout.addWidget(endpoint_group)
+        
+        # Right panel - Port selection and actions
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Port selection
+        port_group = QGroupBox("Ports")
+        port_layout = QVBoxLayout(port_group)
+        self.port_list = QListWidget()
+        self.port_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        port_layout.addWidget(self.port_list)
+        
+        # Removal options
+        options_group = QGroupBox("Removal Options")
+        options_layout = QVBoxLayout(options_group)
+        
+        self.remove_ports_radio = QRadioButton("Remove selected ports only")
+        self.remove_endpoint_radio = QRadioButton("Remove entire endpoint")
+        self.remove_category_radio = QRadioButton("Remove entire category")
+        
+        self.remove_ports_radio.setChecked(True)
+        self.remove_ports_radio.toggled.connect(self.update_removal_options)
+        self.remove_endpoint_radio.toggled.connect(self.update_removal_options)
+        self.remove_category_radio.toggled.connect(self.update_removal_options)
+        
+        options_layout.addWidget(self.remove_ports_radio)
+        options_layout.addWidget(self.remove_endpoint_radio)
+        options_layout.addWidget(self.remove_category_radio)
+        
+        # Add groups to right panel
+        right_layout.addWidget(port_group)
+        right_layout.addWidget(options_group)
+        
+        # Add panels to splitter
+        splitter.addWidget(left_panel)
+        splitter.addWidget(right_panel)
+        
+        # Add splitter to main layout
+        layout.addWidget(splitter)
+        
+        # Warning message
+        self.warning_label = QLabel("Warning: This action cannot be undone. A backup will be created.")
+        self.warning_label.setStyleSheet("color: #ff5252; font-weight: bold;")
+        layout.addWidget(self.warning_label)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        self.remove_button = QPushButton("Remove")
+        self.remove_button.setEnabled(False)
+        self.remove_button.clicked.connect(self.validate_and_accept)
+        
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        
+        button_layout.addWidget(cancel_button)
+        button_layout.addWidget(self.remove_button)
+        layout.addLayout(button_layout)
+        
+        # Populate the category list
+        self.populate_categories()
+        
+    def populate_categories(self):
+        """Populate the category list from the endpoints data"""
+        if 'categories' in self.endpoints_data:
+            for category_name in self.endpoints_data['categories'].keys():
+                self.category_list.addItem(category_name)
+    
+    def on_category_selected(self, current, previous):
+        """Handle category selection"""
+        if current:
+            self.selected_category = current.text()
+            self.populate_endpoints(self.selected_category)
+            self.port_list.clear()
+            self.update_remove_button()
+        else:
+            self.selected_category = None
+            self.endpoint_list.clear()
+            self.port_list.clear()
+            self.update_remove_button()
+    
+    def populate_endpoints(self, category_name):
+        """Populate the endpoint list for the selected category"""
+        self.endpoint_list.clear()
+        if 'categories' in self.endpoints_data and category_name in self.endpoints_data['categories']:
+            category_data = self.endpoints_data['categories'][category_name]
+            if 'endpoints' in category_data:
+                for endpoint in category_data['endpoints']:
+                    if 'domain' in endpoint:
+                        self.endpoint_list.addItem(endpoint['domain'])
+    
+    def on_endpoint_selected(self, current, previous):
+        """Handle endpoint selection"""
+        if current:
+            self.selected_endpoint = current.text()
+            self.populate_ports(self.selected_category, self.selected_endpoint)
+            self.update_remove_button()
+        else:
+            self.selected_endpoint = None
+            self.port_list.clear()
+            self.update_remove_button()
+    
+    def populate_ports(self, category_name, endpoint_domain):
+        """Populate the port list for the selected endpoint"""
+        self.port_list.clear()
+        if 'categories' in self.endpoints_data and category_name in self.endpoints_data['categories']:
+            category_data = self.endpoints_data['categories'][category_name]
+            if 'endpoints' in category_data:
+                for endpoint in category_data['endpoints']:
+                    if endpoint.get('domain') == endpoint_domain and 'ports' in endpoint:
+                        for port_info in endpoint['ports']:
+                            port = port_info.get('port', '')
+                            protocol = port_info.get('protocol', '')
+                            description = port_info.get('description', '')
+                            
+                            # Create a display string
+                            display_text = f"{protocol} (Port {port})"
+                            if description:
+                                display_text += f" - {description}"
+                            
+                            # Store the port info in the item's data
+                            item = QListWidgetItem(display_text)
+                            item.setData(Qt.ItemDataRole.UserRole, {
+                                'port': port,
+                                'protocol': protocol
+                            })
+                            self.port_list.addItem(item)
+    
+    def update_removal_options(self):
+        """Update removal options based on radio button selection"""
+        self.remove_entire_endpoint = self.remove_endpoint_radio.isChecked()
+        self.remove_entire_category = self.remove_category_radio.isChecked()
+        
+        # Enable/disable port selection based on removal option
+        self.port_list.setEnabled(self.remove_ports_radio.isChecked())
+        
+        self.update_remove_button()
+    
+    def update_remove_button(self):
+        """Update the state of the remove button based on selections"""
+        if self.remove_entire_category and self.selected_category:
+            self.remove_button.setEnabled(True)
+        elif self.remove_entire_endpoint and self.selected_endpoint:
+            self.remove_button.setEnabled(True)
+        elif not self.remove_entire_endpoint and not self.remove_entire_category:
+            # For port removal, we need at least one port selected
+            self.remove_button.setEnabled(self.port_list.selectedItems())
+        else:
+            self.remove_button.setEnabled(False)
+    
+    def get_selected_ports(self):
+        """Get the list of selected ports"""
+        selected_ports = []
+        for item in self.port_list.selectedItems():
+            port_data = item.data(Qt.ItemDataRole.UserRole)
+            if port_data:
+                selected_ports.append(port_data)
+        return selected_ports
+    
+    def validate_and_accept(self):
+        """Validate the selections and accept the dialog"""
+        if self.remove_entire_category and self.selected_category:
+            # Confirm category removal
+            confirm = QMessageBox.question(
+                self,
+                "Confirm Category Removal",
+                f"Are you sure you want to remove the entire '{self.selected_category}' category?\n"
+                "This will remove all endpoints in this category.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if confirm == QMessageBox.StandardButton.Yes:
+                self.accept()
+        elif self.remove_entire_endpoint and self.selected_endpoint:
+            # Confirm endpoint removal
+            confirm = QMessageBox.question(
+                self,
+                "Confirm Endpoint Removal",
+                f"Are you sure you want to remove the entire '{self.selected_endpoint}' endpoint?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if confirm == QMessageBox.StandardButton.Yes:
+                self.accept()
+        elif not self.remove_entire_endpoint and not self.remove_entire_category:
+            # Get selected ports
+            self.selected_ports = self.get_selected_ports()
+            if self.selected_ports:
+                # Confirm port removal
+                ports_text = ", ".join([f"{p['protocol']} (Port {p['port']})" for p in self.selected_ports])
+                confirm = QMessageBox.question(
+                    self,
+                    "Confirm Port Removal",
+                    f"Are you sure you want to remove the following ports from '{self.selected_endpoint}'?\n\n{ports_text}",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+                if confirm == QMessageBox.StandardButton.Yes:
+                    self.accept()
+        else:
+            QMessageBox.warning(
+                self,
+                "Invalid Selection",
+                "Please make a valid selection before proceeding.",
+                QMessageBox.StandardButton.Ok
+            )
+    
+    def get_removal_data(self):
+        """Get the data for the removal operation"""
+        if self.remove_entire_category:
+            return {
+                'type': 'category',
+                'category': self.selected_category
+            }
+        elif self.remove_entire_endpoint:
+            return {
+                'type': 'endpoint',
+                'category': self.selected_category,
+                'endpoint': self.selected_endpoint
+            }
+        else:
+            return {
+                'type': 'ports',
+                'category': self.selected_category,
+                'endpoint': self.selected_endpoint,
+                'ports': self.selected_ports
+            }
+
 class LoadingWidget(QWidget):
     """Simple loading indicator widget with a rotating icon"""
     def __init__(self, message="Loading...", parent=None):
@@ -1083,6 +1360,14 @@ class DashboardWindow(QMainWindow):
         add_endpoint_button = QPushButton("Add Endpoint")
         add_endpoint_button.clicked.connect(self.show_add_endpoint_dialog)
         
+        # Remove Endpoint button
+        remove_endpoint_button = QPushButton("Remove Endpoint")
+        remove_endpoint_button.clicked.connect(self.show_remove_endpoint_dialog)
+        
+        # Restore Backup button
+        restore_backup_button = QPushButton("Restore Backup")
+        restore_backup_button.clicked.connect(self.show_restore_backup_dialog)
+        
         # Refresh button
         refresh_button = QPushButton("Refresh")
         refresh_button.clicked.connect(self.refresh_data)
@@ -1090,6 +1375,8 @@ class DashboardWindow(QMainWindow):
         header_layout.addWidget(time_interval_label)
         header_layout.addWidget(self.time_interval_combo)
         header_layout.addWidget(add_endpoint_button)
+        header_layout.addWidget(remove_endpoint_button)
+        header_layout.addWidget(restore_backup_button)
         header_layout.addWidget(refresh_button)
         
         main_layout.insertLayout(0, header_layout)
@@ -2004,6 +2291,348 @@ class DashboardWindow(QMainWindow):
                 logger.error(f"Error adding new endpoint: {str(e)}", exc_info=True)
                 QMessageBox.critical(self, "Error", f"Failed to add endpoint: {str(e)}")
                 self.statusBar().showMessage("Failed to add endpoint")
+    
+    def show_remove_endpoint_dialog(self):
+        """Show dialog for removing endpoints or ports and process the result"""
+        try:
+            # Load current endpoints
+            try:
+                with open('endpoints.json', 'r') as f:
+                    endpoints = json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                QMessageBox.warning(
+                    self,
+                    "Error",
+                    "Could not load endpoints.json file.",
+                    QMessageBox.StandardButton.Ok
+                )
+                return
+            
+            # Create and show the dialog
+            dialog = RemoveEndpointDialog(endpoints, self)
+            if dialog.exec():
+                # Get the removal data
+                removal_data = dialog.get_removal_data()
+                
+                # Create a backup of the current endpoints file
+                self.create_endpoints_backup()
+                
+                # Process the removal based on the type
+                if removal_data['type'] == 'category':
+                    self.remove_category(endpoints, removal_data['category'])
+                elif removal_data['type'] == 'endpoint':
+                    self.remove_endpoint(endpoints, removal_data['category'], removal_data['endpoint'])
+                elif removal_data['type'] == 'ports':
+                    self.remove_ports(endpoints, removal_data['category'], removal_data['endpoint'], removal_data['ports'])
+                
+                # Save the updated endpoints
+                self.save_endpoints(endpoints)
+                
+                # Reload the service checker
+                self.reload_service_checker()
+                
+                # Show success message
+                QMessageBox.information(
+                    self,
+                    "Success",
+                    "Endpoints have been updated successfully.",
+                    QMessageBox.StandardButton.Ok
+                )
+        except Exception as e:
+            logger.error(f"Error in show_remove_endpoint_dialog: {str(e)}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"An error occurred: {str(e)}",
+                QMessageBox.StandardButton.Ok
+            )
+    
+    def create_endpoints_backup(self):
+        """Create a backup of the endpoints.json file"""
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_filename = f"endpoints_backup_{timestamp}.json"
+            
+            # Copy the current file to the backup
+            if os.path.exists('endpoints.json'):
+                with open('endpoints.json', 'r') as src, open(backup_filename, 'w') as dst:
+                    dst.write(src.read())
+                
+                logger.info(f"Created backup of endpoints.json as {backup_filename}")
+                return backup_filename
+            else:
+                logger.warning("endpoints.json does not exist, no backup created")
+                return None
+        except Exception as e:
+            logger.error(f"Error creating backup: {str(e)}", exc_info=True)
+            raise
+    
+    def remove_category(self, endpoints, category_name):
+        """Remove an entire category from the endpoints data"""
+        if 'categories' in endpoints and category_name in endpoints['categories']:
+            del endpoints['categories'][category_name]
+            logger.info(f"Removed category: {category_name}")
+        else:
+            logger.warning(f"Category not found: {category_name}")
+    
+    def remove_endpoint(self, endpoints, category_name, endpoint_domain):
+        """Remove an endpoint from a category"""
+        if 'categories' in endpoints and category_name in endpoints['categories']:
+            category = endpoints['categories'][category_name]
+            if 'endpoints' in category:
+                # Find the endpoint by domain
+                for i, endpoint in enumerate(category['endpoints']):
+                    if endpoint.get('domain') == endpoint_domain:
+                        # Remove the endpoint
+                        category['endpoints'].pop(i)
+                        logger.info(f"Removed endpoint: {endpoint_domain} from category: {category_name}")
+                        return
+                
+                logger.warning(f"Endpoint not found: {endpoint_domain} in category: {category_name}")
+            else:
+                logger.warning(f"No endpoints in category: {category_name}")
+        else:
+            logger.warning(f"Category not found: {category_name}")
+    
+    def remove_ports(self, endpoints, category_name, endpoint_domain, ports_to_remove):
+        """Remove specific ports from an endpoint"""
+        if 'categories' in endpoints and category_name in endpoints['categories']:
+            category = endpoints['categories'][category_name]
+            if 'endpoints' in category:
+                # Find the endpoint by domain
+                for endpoint in category['endpoints']:
+                    if endpoint.get('domain') == endpoint_domain:
+                        if 'ports' in endpoint:
+                            # Create a new list of ports excluding the ones to remove
+                            new_ports = []
+                            for port_info in endpoint['ports']:
+                                # Check if this port should be removed
+                                should_remove = False
+                                for port_to_remove in ports_to_remove:
+                                    if (port_info.get('port') == port_to_remove.get('port') and 
+                                        port_info.get('protocol') == port_to_remove.get('protocol')):
+                                        should_remove = True
+                                        break
+                                
+                                if not should_remove:
+                                    new_ports.append(port_info)
+                            
+                            # Update the endpoint with the new ports list
+                            endpoint['ports'] = new_ports
+                            
+                            # If no ports remain, remove the endpoint
+                            if not new_ports:
+                                self.remove_endpoint(endpoints, category_name, endpoint_domain)
+                                logger.info(f"Removed endpoint {endpoint_domain} as it has no remaining ports")
+                            else:
+                                logger.info(f"Removed ports from endpoint: {endpoint_domain}")
+                            
+                            return
+                
+                logger.warning(f"Endpoint not found: {endpoint_domain} in category: {category_name}")
+            else:
+                logger.warning(f"No endpoints in category: {category_name}")
+        else:
+            logger.warning(f"Category not found: {category_name}")
+    
+    def save_endpoints(self, endpoints):
+        """Save the updated endpoints to the JSON file"""
+        try:
+            # Validate the endpoints structure
+            if 'categories' not in endpoints:
+                raise ValueError("Invalid endpoints structure: 'categories' key is missing")
+            
+            # Save the updated endpoints
+            with open('endpoints.json', 'w') as f:
+                json.dump(endpoints, f, indent=4)
+            
+            logger.info("Saved updated endpoints.json")
+        except Exception as e:
+            logger.error(f"Error saving endpoints: {str(e)}", exc_info=True)
+            raise
+    
+    def reload_service_checker(self):
+        """Reload the service checker with the updated endpoints"""
+        try:
+            # Stop current checks
+            if hasattr(self, 'data_manager'):
+                logger.info("Stopping current data manager")
+                self.data_manager.running = False
+                self.data_manager.wait()
+            
+            # Recreate the service checker with the updated endpoints
+            logger.info("Creating new ServiceChecker instance")
+            self.service_checker = ServiceChecker("endpoints.json")
+            
+            # Verify if endpoints loaded correctly
+            if 'categories' in self.service_checker.endpoints:
+                logger.info(f"ServiceChecker loaded with categories: {list(self.service_checker.endpoints['categories'].keys())}")
+            else:
+                logger.warning("ServiceChecker does not have 'categories' in endpoints structure")
+            
+            # Create and start new data manager
+            logger.info("Creating new DataManagerThread")
+            self.data_manager = DataManagerThread(self.service_checker)
+            self.data_manager.data_ready.connect(self.update_ui)
+            self.data_manager.latency_updated.connect(self.update_latency_graphs)
+            self.data_manager.status_message.connect(self.statusBar().showMessage)
+            self.data_manager.initialization_complete.connect(self.on_initialization_complete)
+            
+            # Show loading states
+            self.overview_loading.show()
+            self.detailed_loading.show()
+            self.trends_loading.show()
+            self.overview_table.hide()
+            self.detailed_table.hide()
+            
+            # Start the data manager
+            self.data_manager.start()
+        except Exception as e:
+            logger.error(f"Error reloading service checker: {str(e)}", exc_info=True)
+            raise
+    
+    def show_restore_backup_dialog(self):
+        """Show dialog for restoring from a backup file"""
+        try:
+            # Find all backup files
+            backup_files = []
+            for file in os.listdir():
+                if file.startswith("endpoints_backup_") and file.endswith(".json"):
+                    backup_files.append(file)
+            
+            if not backup_files:
+                QMessageBox.information(
+                    self,
+                    "No Backups",
+                    "No backup files found.",
+                    QMessageBox.StandardButton.Ok
+                )
+                return
+            
+            # Sort backups by timestamp (newest first)
+            backup_files.sort(reverse=True)
+            
+            # Create a simple dialog to select a backup
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Restore from Backup")
+            dialog.setMinimumWidth(400)
+            
+            layout = QVBoxLayout(dialog)
+            
+            # Add a label
+            label = QLabel("Select a backup file to restore:")
+            layout.addWidget(label)
+            
+            # Add a list widget with backup files
+            list_widget = QListWidget()
+            for file in backup_files:
+                # Extract timestamp from filename
+                timestamp_str = file.replace("endpoints_backup_", "").replace(".json", "")
+                try:
+                    # Convert timestamp to readable format
+                    timestamp = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
+                    display_text = f"{timestamp.strftime('%Y-%m-%d %H:%M:%S')} ({file})"
+                except ValueError:
+                    display_text = file
+                
+                item = QListWidgetItem(display_text)
+                item.setData(Qt.ItemDataRole.UserRole, file)
+                list_widget.addItem(item)
+            
+            list_widget.setCurrentRow(0)  # Select the newest backup by default
+            layout.addWidget(list_widget)
+            
+            # Add warning label
+            warning = QLabel("Warning: This will overwrite your current endpoints configuration.")
+            warning.setStyleSheet("color: #ff5252; font-weight: bold;")
+            layout.addWidget(warning)
+            
+            # Add buttons
+            button_layout = QHBoxLayout()
+            cancel_button = QPushButton("Cancel")
+            cancel_button.clicked.connect(dialog.reject)
+            
+            restore_button = QPushButton("Restore")
+            
+            button_layout.addWidget(cancel_button)
+            button_layout.addWidget(restore_button)
+            layout.addLayout(button_layout)
+            
+            # Connect restore button to a function that gets the selected backup
+            def on_restore_clicked():
+                selected_items = list_widget.selectedItems()
+                if selected_items:
+                    selected_file = selected_items[0].data(Qt.ItemDataRole.UserRole)
+                    dialog.accept()
+                    self.restore_from_backup(selected_file)
+            
+            restore_button.clicked.connect(on_restore_clicked)
+            
+            # Show the dialog
+            dialog.exec()
+            
+        except Exception as e:
+            logger.error(f"Error in show_restore_backup_dialog: {str(e)}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"An error occurred: {str(e)}",
+                QMessageBox.StandardButton.Ok
+            )
+    
+    def restore_from_backup(self, backup_file):
+        """Restore endpoints from a backup file"""
+        try:
+            # Confirm restoration
+            confirm = QMessageBox.question(
+                self,
+                "Confirm Restore",
+                f"Are you sure you want to restore from {backup_file}?\n"
+                "This will overwrite your current endpoints configuration.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
+            
+            # Create a backup of the current file before restoring
+            current_backup = self.create_endpoints_backup()
+            
+            # Load the backup file
+            with open(backup_file, 'r') as f:
+                backup_data = json.load(f)
+            
+            # Validate the backup data
+            if 'categories' not in backup_data:
+                raise ValueError("Invalid backup file: 'categories' key is missing")
+            
+            # Save the backup data as the new endpoints.json
+            with open('endpoints.json', 'w') as f:
+                json.dump(backup_data, f, indent=4)
+            
+            logger.info(f"Restored endpoints from backup: {backup_file}")
+            
+            # Reload the service checker
+            self.reload_service_checker()
+            
+            # Show success message
+            QMessageBox.information(
+                self,
+                "Success",
+                f"Successfully restored from {backup_file}.\n"
+                f"A backup of your previous configuration was created as {current_backup}.",
+                QMessageBox.StandardButton.Ok
+            )
+            
+        except Exception as e:
+            logger.error(f"Error restoring from backup: {str(e)}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to restore from backup: {str(e)}",
+                QMessageBox.StandardButton.Ok
+            )
 
 class DataManagerThread(QThread):
     """Thread for managing all data processing and service checks"""

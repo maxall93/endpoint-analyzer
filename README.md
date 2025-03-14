@@ -55,6 +55,8 @@ python main.py
 
 3. Use the top toolbar to:
    - Add new endpoints
+   - Remove endpoints or specific ports
+   - Restore from backups
    - Refresh data manually
    - Change the time interval for latency graphs
 
@@ -97,6 +99,25 @@ python main.py
    - Custom Port Check
 5. Choose between TCP Port Only or Full Protocol Check
 6. Save the configuration
+
+### Removing Endpoints
+
+1. Click the "Remove Endpoint" button
+2. Select a service category from the left panel
+3. Select an endpoint from the category
+4. Choose a removal option:
+   - Remove specific ports (select ports from the list)
+   - Remove the entire endpoint
+   - Remove the entire category
+5. Confirm the removal action
+6. A backup of the current configuration will be automatically created
+
+### Restoring from Backups
+
+1. Click the "Restore Backup" button
+2. Select a backup file from the list (sorted by date, newest first)
+3. Confirm the restoration
+4. The application will create a backup of the current configuration before restoring
 
 ### Endpoint Check Types
 
