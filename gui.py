@@ -16,10 +16,10 @@ from PyQt6.QtWidgets import (
     QHeaderView, QProgressBar, QSplitter, QTextEdit, QMessageBox, 
     QStatusBar, QSizePolicy, QScrollArea, QGroupBox, QGridLayout,
     QFrame, QSpacerItem, QComboBox, QDialog, QLineEdit, QCheckBox,
-    QFormLayout
+    QFormLayout, QSpinBox, QRadioButton, QButtonGroup, QListWidget, QListWidgetItem
 )
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QSize
-from PyQt6.QtGui import QIcon, QPixmap, QColor, QPalette
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QSize, QPropertyAnimation, QEasingCurve, QPoint
+from PyQt6.QtGui import QIcon, QPixmap, QColor, QPalette, QTransform, QPainter, QPen, QPolygon
 
 import matplotlib
 matplotlib.use('QtAgg')  # Use QtAgg for PyQt6 compatibility
@@ -692,18 +692,145 @@ class AddEndpointDialog(QDialog):
         
         # Buttons
         button_layout = QHBoxLayout()
-        save_button = QPushButton("Save")
-        save_button.clicked.connect(self.accept)
+        self.save_button = QPushButton("Save")
+        self.save_button.clicked.connect(self.validate_and_accept)
         cancel_button = QPushButton("Cancel")
         cancel_button.clicked.connect(self.reject)
-        button_layout.addWidget(save_button)
+        button_layout.addWidget(self.save_button)
         button_layout.addWidget(cancel_button)
         layout.addLayout(button_layout)
         
+        # Connect domain edit to validation
+        self.domain_edit.textChanged.connect(self.validate_form)
+        
+        # Initial validation
+        self.validate_form()
+    
+    def standardize_domain(self, domain):
+        """Standardize domain format by removing protocol prefixes and www"""
+        # Remove leading/trailing whitespace
+        domain = domain.strip()
+        
+        # Remove protocol prefixes
+        if domain.startswith('http://'):
+            domain = domain[7:]
+        elif domain.startswith('https://'):
+            domain = domain[8:]
+        
+        # Remove www. prefix
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        
+        # Remove any trailing slashes or paths
+        domain = domain.split('/')[0]
+        
+        # Remove any query parameters
+        domain = domain.split('?')[0]
+        
+        # Remove any port specifications
+        domain = domain.split(':')[0]
+        
+        # Check for valid domain format
+        if not self.is_valid_domain(domain):
+            return ""
+        
+        return domain
+    
+    def is_valid_domain(self, domain):
+        """Check if a domain has a valid format with a TLD"""
+        if not domain:
+            return False
+            
+        # Split domain into parts
+        parts = domain.split('.')
+        
+        # Must have at least two parts (name and TLD)
+        if len(parts) < 2:
+            return False
+            
+        # Each part must be at least 1 character
+        if not all(len(part) > 0 for part in parts):
+            return False
+            
+        # Last part (TLD) must be at least 2 characters
+        if len(parts[-1]) < 2:
+            return False
+            
+        # Check for valid characters in domain
+        import re
+        domain_regex = r'^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z]{2,})+$'
+        return bool(re.match(domain_regex, domain))
+        
+    def validate_form(self):
+        """Validate the form and enable/disable the save button"""
+        raw_domain = self.domain_edit.text()
+        domain = self.standardize_domain(raw_domain)
+        is_valid = bool(domain)  # Domain is required and must be valid
+        
+        # Enable/disable save button based on validation
+        self.save_button.setEnabled(is_valid)
+        
+        # Visual feedback
+        if not raw_domain:
+            self.domain_edit.setStyleSheet("border: 1px solid red;")
+            self.domain_edit.setToolTip("Domain is required")
+        elif not domain:
+            self.domain_edit.setStyleSheet("border: 1px solid red;")
+            self.domain_edit.setToolTip("Invalid domain format. Must include a valid domain name and TLD (e.g., .com, .org, .co.uk)")
+        else:
+            self.domain_edit.setStyleSheet("")
+            # Show standardized domain as tooltip
+            if domain != raw_domain:
+                self.domain_edit.setToolTip(f"Will be saved as: {domain}")
+            else:
+                self.domain_edit.setToolTip("")
+    
+    def validate_and_accept(self):
+        """Validate the form and accept if valid"""
+        raw_domain = self.domain_edit.text()
+        domain = self.standardize_domain(raw_domain)
+        
+        if not domain:
+            QMessageBox.warning(self, "Validation Error", 
+                              "Please enter a valid domain with a top-level domain (e.g., example.com, site.co.uk)")
+            return
+        
+        # Check if at least one protocol is selected
+        if not (self.https_check.isChecked() or self.http_check.isChecked() or self.custom_port_check.isChecked()):
+            QMessageBox.warning(self, "Validation Error", "At least one protocol must be selected.")
+            return
+            
+        # Validate custom port if checked
+        if self.custom_port_check.isChecked():
+            try:
+                port = int(self.custom_port_edit.text())
+                if not (1 <= port <= 65535):
+                    QMessageBox.warning(self, "Validation Error", "Port must be between 1 and 65535.")
+                    return
+            except ValueError:
+                QMessageBox.warning(self, "Validation Error", "Port must be a valid number.")
+                return
+        
+        # If domain format changed, show a confirmation
+        if domain != raw_domain:
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Icon.Information)
+            msg.setText(f"The domain will be standardized to: {domain}")
+            msg.setInformativeText("This ensures consistent formatting for all endpoints.")
+            msg.setWindowTitle("Domain Format")
+            msg.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+            if msg.exec() == QMessageBox.StandardButton.Cancel:
+                return
+        
+        self.accept()
+        
     def get_endpoint_data(self):
-        """Get the endpoint data from the form"""
+        """Get the endpoint data from the form with sensible defaults"""
         ports = []
         checks = []
+        
+        # Standardize the domain
+        domain = self.standardize_domain(self.domain_edit.text())
         
         # Add DNS check if enabled
         if self.dns_check.isChecked():
@@ -753,25 +880,450 @@ class AddEndpointDialog(QDialog):
                             "enabled": True
                         })
             except ValueError:
-                pass
+                # Default to TCP on port 443 if invalid
+                ports.append({
+                    "port": 443,
+                    "protocol": "TCP"
+                })
+        
+        # Ensure we have at least one port if none were selected
+        if not ports:
+            ports.append({
+                "port": 443,
+                "protocol": "HTTPS"
+            })
+            
+        # Get description or use domain as default
+        description = self.description_edit.text().strip()
+        if not description:
+            description = f"Endpoint for {domain}"
         
         return {
             "service": self.service_combo.currentText(),
             "endpoint": {
-                "domain": self.domain_edit.text(),
-                "description": self.description_edit.text(),
+                "domain": domain,
+                "description": description,
                 "ports": ports,
-                "checks": checks
+                "checks": checks,
+                "http_check": any(p.get("protocol") in ["HTTP", "HTTPS"] for p in ports)
             }
         }
+
+class RemoveEndpointDialog(QDialog):
+    """Dialog for removing endpoints or specific ports from endpoints"""
+    
+    def __init__(self, endpoints_data, parent=None):
+        super().__init__(parent)
+        self.endpoints_data = endpoints_data
+        self.selected_category = None
+        self.selected_endpoint = None
+        self.selected_ports = []
+        self.remove_entire_endpoint = False
+        self.remove_entire_category = False
+        self.setup_ui()
+        
+    def setup_ui(self):
+        """Set up the dialog UI"""
+        self.setWindowTitle("Remove Endpoint")
+        self.setMinimumWidth(600)
+        self.setMinimumHeight(500)
+        
+        # Main layout
+        layout = QVBoxLayout(self)
+        
+        # Create a splitter for the two-panel layout
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        
+        # Left panel - Categories and Endpoints tree
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Category selection
+        category_group = QGroupBox("Categories")
+        category_layout = QVBoxLayout(category_group)
+        self.category_list = QListWidget()
+        self.category_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.category_list.currentItemChanged.connect(self.on_category_selected)
+        category_layout.addWidget(self.category_list)
+        
+        # Endpoint selection
+        endpoint_group = QGroupBox("Endpoints")
+        endpoint_layout = QVBoxLayout(endpoint_group)
+        self.endpoint_list = QListWidget()
+        self.endpoint_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.endpoint_list.currentItemChanged.connect(self.on_endpoint_selected)
+        endpoint_layout.addWidget(self.endpoint_list)
+        
+        # Add groups to left panel
+        left_layout.addWidget(category_group)
+        left_layout.addWidget(endpoint_group)
+        
+        # Right panel - Port selection and actions
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Port selection
+        port_group = QGroupBox("Ports")
+        port_layout = QVBoxLayout(port_group)
+        self.port_list = QListWidget()
+        self.port_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        port_layout.addWidget(self.port_list)
+        
+        # Removal options
+        options_group = QGroupBox("Removal Options")
+        options_layout = QVBoxLayout(options_group)
+        
+        self.remove_ports_radio = QRadioButton("Remove selected ports only")
+        self.remove_endpoint_radio = QRadioButton("Remove entire endpoint")
+        self.remove_category_radio = QRadioButton("Remove entire category")
+        
+        self.remove_ports_radio.setChecked(True)
+        self.remove_ports_radio.toggled.connect(self.update_removal_options)
+        self.remove_endpoint_radio.toggled.connect(self.update_removal_options)
+        self.remove_category_radio.toggled.connect(self.update_removal_options)
+        
+        options_layout.addWidget(self.remove_ports_radio)
+        options_layout.addWidget(self.remove_endpoint_radio)
+        options_layout.addWidget(self.remove_category_radio)
+        
+        # Add groups to right panel
+        right_layout.addWidget(port_group)
+        right_layout.addWidget(options_group)
+        
+        # Add panels to splitter
+        splitter.addWidget(left_panel)
+        splitter.addWidget(right_panel)
+        
+        # Add splitter to main layout
+        layout.addWidget(splitter)
+        
+        # Warning message
+        self.warning_label = QLabel("Warning: This action cannot be undone. A backup will be created.")
+        self.warning_label.setStyleSheet("color: #ff5252; font-weight: bold;")
+        layout.addWidget(self.warning_label)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        self.remove_button = QPushButton("Remove")
+        self.remove_button.setEnabled(False)
+        self.remove_button.clicked.connect(self.validate_and_accept)
+        
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        
+        button_layout.addWidget(cancel_button)
+        button_layout.addWidget(self.remove_button)
+        layout.addLayout(button_layout)
+        
+        # Populate the category list
+        self.populate_categories()
+        
+    def populate_categories(self):
+        """Populate the category list from the endpoints data"""
+        if 'categories' in self.endpoints_data:
+            for category_name in self.endpoints_data['categories'].keys():
+                self.category_list.addItem(category_name)
+    
+    def on_category_selected(self, current, previous):
+        """Handle category selection"""
+        if current:
+            self.selected_category = current.text()
+            self.populate_endpoints(self.selected_category)
+            self.port_list.clear()
+            self.update_remove_button()
+        else:
+            self.selected_category = None
+            self.endpoint_list.clear()
+            self.port_list.clear()
+            self.update_remove_button()
+    
+    def populate_endpoints(self, category_name):
+        """Populate the endpoint list for the selected category"""
+        self.endpoint_list.clear()
+        if 'categories' in self.endpoints_data and category_name in self.endpoints_data['categories']:
+            category_data = self.endpoints_data['categories'][category_name]
+            if 'endpoints' in category_data:
+                for endpoint in category_data['endpoints']:
+                    if 'domain' in endpoint:
+                        self.endpoint_list.addItem(endpoint['domain'])
+    
+    def on_endpoint_selected(self, current, previous):
+        """Handle endpoint selection"""
+        if current:
+            self.selected_endpoint = current.text()
+            self.populate_ports(self.selected_category, self.selected_endpoint)
+            self.update_remove_button()
+        else:
+            self.selected_endpoint = None
+            self.port_list.clear()
+            self.update_remove_button()
+    
+    def populate_ports(self, category_name, endpoint_domain):
+        """Populate the port list for the selected endpoint"""
+        self.port_list.clear()
+        if 'categories' in self.endpoints_data and category_name in self.endpoints_data['categories']:
+            category_data = self.endpoints_data['categories'][category_name]
+            if 'endpoints' in category_data:
+                for endpoint in category_data['endpoints']:
+                    if endpoint.get('domain') == endpoint_domain and 'ports' in endpoint:
+                        for port_info in endpoint['ports']:
+                            port = port_info.get('port', '')
+                            protocol = port_info.get('protocol', '')
+                            description = port_info.get('description', '')
+                            
+                            # Create a display string
+                            display_text = f"{protocol} (Port {port})"
+                            if description:
+                                display_text += f" - {description}"
+                            
+                            # Store the port info in the item's data
+                            item = QListWidgetItem(display_text)
+                            item.setData(Qt.ItemDataRole.UserRole, {
+                                'port': port,
+                                'protocol': protocol
+                            })
+                            self.port_list.addItem(item)
+    
+    def update_removal_options(self):
+        """Update removal options based on radio button selection"""
+        self.remove_entire_endpoint = self.remove_endpoint_radio.isChecked()
+        self.remove_entire_category = self.remove_category_radio.isChecked()
+        
+        # Enable/disable port selection based on removal option
+        self.port_list.setEnabled(self.remove_ports_radio.isChecked())
+        
+        self.update_remove_button()
+    
+    def update_remove_button(self):
+        """Update the state of the remove button based on selections"""
+        if self.remove_entire_category and self.selected_category:
+            self.remove_button.setEnabled(True)
+        elif self.remove_entire_endpoint and self.selected_endpoint:
+            self.remove_button.setEnabled(True)
+        elif not self.remove_entire_endpoint and not self.remove_entire_category:
+            # For port removal, we need at least one port selected
+            self.remove_button.setEnabled(self.port_list.selectedItems())
+        else:
+            self.remove_button.setEnabled(False)
+    
+    def get_selected_ports(self):
+        """Get the list of selected ports"""
+        selected_ports = []
+        for item in self.port_list.selectedItems():
+            port_data = item.data(Qt.ItemDataRole.UserRole)
+            if port_data:
+                selected_ports.append(port_data)
+        return selected_ports
+    
+    def validate_and_accept(self):
+        """Validate the selections and accept the dialog"""
+        if self.remove_entire_category and self.selected_category:
+            # Confirm category removal
+            confirm = QMessageBox.question(
+                self,
+                "Confirm Category Removal",
+                f"Are you sure you want to remove the entire '{self.selected_category}' category?\n"
+                "This will remove all endpoints in this category.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if confirm == QMessageBox.StandardButton.Yes:
+                self.accept()
+        elif self.remove_entire_endpoint and self.selected_endpoint:
+            # Confirm endpoint removal
+            confirm = QMessageBox.question(
+                self,
+                "Confirm Endpoint Removal",
+                f"Are you sure you want to remove the entire '{self.selected_endpoint}' endpoint?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if confirm == QMessageBox.StandardButton.Yes:
+                self.accept()
+        elif not self.remove_entire_endpoint and not self.remove_entire_category:
+            # Get selected ports
+            self.selected_ports = self.get_selected_ports()
+            if self.selected_ports:
+                # Confirm port removal
+                ports_text = ", ".join([f"{p['protocol']} (Port {p['port']})" for p in self.selected_ports])
+                confirm = QMessageBox.question(
+                    self,
+                    "Confirm Port Removal",
+                    f"Are you sure you want to remove the following ports from '{self.selected_endpoint}'?\n\n{ports_text}",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+                if confirm == QMessageBox.StandardButton.Yes:
+                    self.accept()
+        else:
+            QMessageBox.warning(
+                self,
+                "Invalid Selection",
+                "Please make a valid selection before proceeding.",
+                QMessageBox.StandardButton.Ok
+            )
+    
+    def get_removal_data(self):
+        """Get the data for the removal operation"""
+        if self.remove_entire_category:
+            return {
+                'type': 'category',
+                'category': self.selected_category
+            }
+        elif self.remove_entire_endpoint:
+            return {
+                'type': 'endpoint',
+                'category': self.selected_category,
+                'endpoint': self.selected_endpoint
+            }
+        else:
+            return {
+                'type': 'ports',
+                'category': self.selected_category,
+                'endpoint': self.selected_endpoint,
+                'ports': self.selected_ports
+            }
+
+class LoadingWidget(QWidget):
+    """Simple loading indicator widget with a rotating icon"""
+    def __init__(self, message="Loading...", parent=None):
+        super().__init__(parent)
+        self.angle = 0
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.rotate)
+        
+        # Main layout - use grid layout for better centering
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        # Create container widget for centering
+        container = QWidget()
+        container.setFixedSize(120, 120)
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        # Create a fixed size label for the icon
+        self.icon_label = QLabel()
+        self.icon_label.setFixedSize(80, 80)
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        container_layout.addWidget(self.icon_label)
+        
+        # Create the initial icon
+        self.update_icon()
+        
+        # Loading message
+        self.message_label = QLabel(message)
+        self.message_label.setStyleSheet("""
+            QLabel {
+                color: #2196F3;
+                font-size: 14px;
+                font-weight: bold;
+            }
+        """)
+        self.message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        # Add widgets to layout
+        layout.addStretch(1)
+        layout.addWidget(container, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.message_label, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addStretch(1)
+        
+        # Start animation
+        self.timer.start(30)
+        
+    def update_icon(self):
+        """Create and update the rotating icon"""
+        # Create a small fixed-size pixmap
+        pixmap = QPixmap(80, 80)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        
+        # Set up painter
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Move to center
+        painter.translate(40, 40)
+        
+        # Draw a standard circular spinner
+        pen = QPen()
+        pen.setWidth(4)
+        
+        # Draw the complete circle in a lighter color
+        pen.setColor(QColor(33, 150, 243, 40))  # Light blue
+        painter.setPen(pen)
+        painter.drawEllipse(-30, -30, 60, 60)
+        
+        # Draw the rotating segment in a brighter color
+        pen.setColor(QColor(33, 150, 243, 255))  # Bright blue
+        painter.setPen(pen)
+        painter.rotate(self.angle)
+        
+        # Draw just a segment of the circle that rotates
+        painter.drawArc(-30, -30, 60, 60, 0, 120 * 16)  # Draw 1/3 of a circle
+        
+        # Clean up
+        painter.end()
+        
+        # Set the pixmap to the label
+        self.icon_label.setPixmap(pixmap)
+        
+    def rotate(self):
+        """Rotate the loading icon"""
+        self.angle = (self.angle + 6) % 360
+        self.update_icon()
+        
+    def setMessage(self, message):
+        """Update the loading message"""
+        self.message_label.setText(message)
+        
+    def showEvent(self, event):
+        """Start animation when widget becomes visible"""
+        self.timer.start(30)
+        super().showEvent(event)
+        
+    def hideEvent(self, event):
+        """Stop animation when widget becomes hidden"""
+        self.timer.stop()
+        super().hideEvent(event)
 
 class DashboardWindow(QMainWindow):
     """Main application window"""
     def __init__(self):
         super().__init__()
         
-        # Initialize ServiceChecker
-        self.service_checker = ServiceChecker()
+        # Set up logging
+        global logger
+        logger.info("Initializing Dashboard Window")
+        
+        # Initialize ServiceChecker with explicit file path
+        try:
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            endpoints_path = os.path.join(current_dir, "endpoints.json")
+            logger.info(f"Loading endpoints from: {endpoints_path}")
+            
+            self.service_checker = ServiceChecker(endpoints_path)
+            
+            # Verify endpoints loaded
+            if hasattr(self.service_checker, 'endpoints'):
+                if 'categories' in self.service_checker.endpoints:
+                    categories = list(self.service_checker.endpoints['categories'].keys())
+                    logger.info(f"ServiceChecker initialized with categories: {categories}")
+                    endpoint_count = 0
+                    for service in self.service_checker.endpoints['categories'].values():
+                        if 'endpoints' in service:
+                            endpoint_count += len(service['endpoints'])
+                    logger.info(f"Total endpoints loaded: {endpoint_count}")
+                else:
+                    logger.warning("ServiceChecker has no 'categories' in endpoints structure")
+            else:
+                logger.error("ServiceChecker failed to load endpoints")
+        except Exception as e:
+            logger.error(f"Error initializing ServiceChecker: {str(e)}", exc_info=True)
+            self.service_checker = ServiceChecker()  # Fallback to empty checker
         
         # Set up UI
         self.setWindowTitle("M365 Endpoint Analyzer")
@@ -808,6 +1360,14 @@ class DashboardWindow(QMainWindow):
         add_endpoint_button = QPushButton("Add Endpoint")
         add_endpoint_button.clicked.connect(self.show_add_endpoint_dialog)
         
+        # Remove Endpoint button
+        remove_endpoint_button = QPushButton("Remove Endpoint")
+        remove_endpoint_button.clicked.connect(self.show_remove_endpoint_dialog)
+        
+        # Restore Backup button
+        restore_backup_button = QPushButton("Restore Backup")
+        restore_backup_button.clicked.connect(self.show_restore_backup_dialog)
+        
         # Refresh button
         refresh_button = QPushButton("Refresh")
         refresh_button.clicked.connect(self.refresh_data)
@@ -815,6 +1375,8 @@ class DashboardWindow(QMainWindow):
         header_layout.addWidget(time_interval_label)
         header_layout.addWidget(self.time_interval_combo)
         header_layout.addWidget(add_endpoint_button)
+        header_layout.addWidget(remove_endpoint_button)
+        header_layout.addWidget(restore_backup_button)
         header_layout.addWidget(refresh_button)
         
         main_layout.insertLayout(0, header_layout)
@@ -822,11 +1384,15 @@ class DashboardWindow(QMainWindow):
         # Status bar
         self.statusBar().showMessage("Initializing...")
         
-        # Setup update timer and thread first
-        self.setup_checker_thread()
+        # Setup data manager thread
+        self.data_manager = DataManagerThread(self.service_checker)
+        self.data_manager.data_ready.connect(self.update_ui)
+        self.data_manager.latency_updated.connect(self.update_latency_graphs)
+        self.data_manager.status_message.connect(self.statusBar().showMessage)
+        self.data_manager.initialization_complete.connect(self.on_initialization_complete)
         
-        # Use QTimer to initialize data after UI is shown
-        QTimer.singleShot(100, self.initialize_data)
+        # Start the data manager thread
+        self.data_manager.start()
         
     def setup_dark_theme(self):
         """Set up dark theme for the application"""
@@ -963,7 +1529,11 @@ class DashboardWindow(QMainWindow):
         self.overview_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.overview_table.verticalHeader().setVisible(False)
         
+        # Add loading widget
+        self.overview_loading = LoadingWidget("Initializing Service Overview...", self)
+        overview_layout.addWidget(self.overview_loading)
         overview_layout.addWidget(self.overview_table)
+        self.overview_table.hide()  # Hide table initially
         
         # Add overview tab to main tab widget
         self.tabs.addTab(overview_tab, "Service Overview")
@@ -984,6 +1554,12 @@ class DashboardWindow(QMainWindow):
             'Check Type',
             'Details'
         ])
+        
+        # Add loading widget
+        self.detailed_loading = LoadingWidget("Initializing Detailed Status...", self)
+        detailed_layout.addWidget(self.detailed_loading)
+        detailed_layout.addWidget(self.detailed_table)
+        self.detailed_table.hide()  # Hide table initially
         
         # Make header interactive and movable
         header = self.detailed_table.horizontalHeader()
@@ -1022,64 +1598,92 @@ class DashboardWindow(QMainWindow):
     def setup_latency_trends_tab(self):
         """Set up the latency trends tab"""
         try:
-            logger.info("Setting up latency trends tab")
-            print("Creating latency trends tab...")
-            
-            # Create the tab widget
+            # Remove any existing Latency Trends tab
+            for i in range(self.tabs.count()):
+                if self.tabs.tabText(i) == "Latency Trends":
+                    # Clean up old widgets
+                    old_tab = self.tabs.widget(i)
+                    if hasattr(old_tab, 'findChildren'):
+                        # Stop any loading animations
+                        for loading in old_tab.findChildren(LoadingWidget):
+                            if hasattr(loading, 'timer'):
+                                loading.timer.stop()
+                        # Clean up any graph widgets
+                        for graph in old_tab.findChildren(LatencyGraph):
+                            if hasattr(graph, 'canvas'):
+                                graph.canvas.close()
+                    # Remove the tab
+                    self.tabs.removeTab(i)
+                    if old_tab:
+                        old_tab.deleteLater()
+                    break
+
+            # Create new tab widget
             trends_tab = QWidget()
             trends_layout = QVBoxLayout(trends_tab)
             
+            # Add loading widget
+            self.trends_loading = LoadingWidget("Initializing Latency Trends...", self)
+            trends_layout.addWidget(self.trends_loading)
+            
             # Create scroll area for graphs
-            scroll_area = QScrollArea()
-            scroll_area.setWidgetResizable(True)
+            self.trends_scroll = QScrollArea()
+            self.trends_scroll.setWidgetResizable(True)
             scroll_contents = QWidget()
-            scroll_layout = QGridLayout(scroll_contents)
+            self.trends_scroll_layout = QGridLayout(scroll_contents)  # Make it accessible as instance variable
             
             # Get endpoints from the service checker
             self.core_endpoints = self.get_core_endpoints()
             
-            # Create graph widgets for each core endpoint
-            self.graph_widgets = {}
-            row, col = 0, 0
-            for endpoint in self.core_endpoints:
-                try:
-                    logger.debug(f"Creating graph for {endpoint}")
-                    print(f"Creating graph for {endpoint}")
-                    # Set auto_generate_test_data to False to ensure we only use real data
-                    graph = LatencyGraph(endpoint, self.service_checker, parent=scroll_contents, auto_generate_test_data=False)
-                    self.graph_widgets[endpoint] = graph
-                    scroll_layout.addWidget(graph, row, col)
-                    
-                    # Update grid position
-                    col += 1
-                    if col > 1:  # Two columns of graphs
-                        col = 0
-                        row += 1
-                except Exception as e:
-                    logger.error(f"Error creating graph for {endpoint}: {str(e)}", exc_info=True)
-                    print(f"Error creating graph for {endpoint}: {str(e)}")
-            
-            # Set the scroll contents
-            scroll_contents.setLayout(scroll_layout)
-            scroll_area.setWidget(scroll_contents)
-            
-            # Add scroll area to the main layout
-            trends_layout.addWidget(scroll_area)
+            if not self.core_endpoints:
+                # Show "No endpoints found" message
+                no_data_label = QLabel("No endpoints found. Add endpoints to see latency trends.")
+                no_data_label.setStyleSheet("color: #aaaaaa; font-size: 14px;")
+                no_data_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                trends_layout.addWidget(no_data_label)
+                self.trends_loading.hide()
+            else:
+                # Create graph widgets for each core endpoint
+                self.graph_widgets = {}
+                row, col = 0, 0
+                for endpoint in self.core_endpoints:
+                    try:
+                        logger.debug(f"Creating graph for {endpoint}")
+                        # Set auto_generate_test_data to False to ensure we only use real data
+                        graph = LatencyGraph(endpoint, self.service_checker, parent=scroll_contents, auto_generate_test_data=False)
+                        self.graph_widgets[endpoint] = graph
+                        self.trends_scroll_layout.addWidget(graph, row, col)
+                        
+                        # Update grid position
+                        col += 1
+                        if col > 1:  # Two columns of graphs
+                            col = 0
+                            row += 1
+                    except Exception as e:
+                        logger.error(f"Error creating graph for {endpoint}: {str(e)}", exc_info=True)
+                
+                # Set the scroll contents
+                scroll_contents.setLayout(self.trends_scroll_layout)
+                self.trends_scroll.setWidget(scroll_contents)
+                trends_layout.addWidget(self.trends_scroll)
+                
+                # Initially hide scroll area until data is ready
+                self.trends_scroll.hide()
             
             # Add tab to the main tab widget
             self.tabs.addTab(trends_tab, "Latency Trends")
             
-            logger.info(f"Created {len(self.graph_widgets)} graph widgets")
-            print(f"Created {len(self.graph_widgets)} graph widgets")
+            logger.info(f"Created {len(self.graph_widgets) if hasattr(self, 'graph_widgets') else 0} graph widgets")
+            
         except Exception as e:
             logger.error(f"Error setting up latency trends tab: {str(e)}", exc_info=True)
-            print(f"Error setting up latency trends tab: {str(e)}")
             
             # Create a simple error message tab
             error_tab = QWidget()
             error_layout = QVBoxLayout(error_tab)
-            error_label = QLabel("Error loading latency graphs. Check logs for details.")
-            error_label.setStyleSheet("color: red;")
+            error_label = QLabel(f"Error loading latency graphs: {str(e)}\nCheck logs for details.")
+            error_label.setStyleSheet("color: #ff5252; padding: 20px;")
+            error_label.setWordWrap(True)
             error_layout.addWidget(error_label)
             self.tabs.addTab(error_tab, "Latency Trends")
             
@@ -1093,12 +1697,14 @@ class DashboardWindow(QMainWindow):
             return endpoints
             
         # Extract domains from each service category
-        for service_name, service_data in self.service_checker.endpoints.items():
-            for endpoint_data in service_data.get('endpoints', []):
-                domain = endpoint_data.get('domain', '')
-                if domain:
-                    endpoints.append(domain)
-                    
+        if 'categories' in self.service_checker.endpoints:
+            for service_name, service_data in self.service_checker.endpoints['categories'].items():
+                if isinstance(service_data, dict) and 'endpoints' in service_data:
+                    for endpoint_data in service_data['endpoints']:
+                        domain = endpoint_data.get('domain', '')
+                        if domain:
+                            endpoints.append(domain)
+                            
         logger.info(f"Found {len(endpoints)} core endpoints")
         return endpoints
         
@@ -1110,18 +1716,38 @@ class DashboardWindow(QMainWindow):
         
     def update_ui(self, results):
         """Update the UI with the latest check results"""
-        # Update status bar
-        self.statusBar().showMessage(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        
-        # Update Overview tab
-        self.update_overview_table(results)
-        
-        # Update Detailed Status tab
-        self.update_detailed_table(results)
-        
-        # Update Latency Trends tab
-        self.update_latency_graphs()
-        
+        try:
+            # Update status bar
+            self.statusBar().showMessage(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            # Ensure results is a valid dictionary
+            if not isinstance(results, dict):
+                logger.error(f"Invalid results type: {type(results)}")
+                results = {}
+            
+            # Update Overview tab
+            self.update_overview_table(results)
+            
+            # Update Detailed Status tab
+            self.update_detailed_table(results)
+            
+            # Update Latency Trends tab
+            self.update_latency_graphs()
+            
+            # Make sure tables are visible
+            self.overview_table.show()
+            self.detailed_table.show()
+            self.overview_loading.hide()
+            self.detailed_loading.hide()
+            
+        except Exception as e:
+            logger.error(f"Error updating UI: {str(e)}", exc_info=True)
+            # Still show tables even if there was an error
+            self.overview_table.show()
+            self.detailed_table.show()
+            self.overview_loading.hide()
+            self.detailed_loading.hide()
+    
     def update_overview_table(self, results):
         """Update the overview table with service status summary"""
         if hasattr(self.service_checker, 'get_service_status'):
@@ -1163,32 +1789,56 @@ class DashboardWindow(QMainWindow):
             details_text = status.get('details', '') if isinstance(status, dict) else ''
             details_item = QTableWidgetItem(details_text)
             self.overview_table.setItem(row_position, 2, details_item)
-            
+        
     def update_detailed_table(self, results):
         """Update the detailed status table with all endpoint checks"""
-        # Clear table
-        self.detailed_table.setRowCount(0)
-        
-        # Debug info
-        logger.info(f"Updating detailed table with results: {list(results.keys())}")
-        
-        # Group unhealthy services at the top
-        unhealthy_rows = []
-        healthy_rows = []
-        
         try:
-            # Process results into row data
+            # Clear table
+            self.detailed_table.setRowCount(0)
+            
+            # Log what we received
+            logger.info(f"Updating detailed table with results for services: {list(results.keys())}")
+            
+            # Debug log for service checker endpoints
+            if not hasattr(self.service_checker, 'endpoints'):
+                logger.error("ServiceChecker has no endpoints attribute")
+                return
+            
+            if 'categories' not in self.service_checker.endpoints:
+                logger.error("ServiceChecker endpoints does not have 'categories' key")
+                return
+                
+            # Initialize tracking sets and lists
+            processed_endpoints = set()
+            healthy_rows = []
+            unhealthy_rows = []
+            
+            # Initialize all_endpoints dictionary from configuration
+            all_endpoints = {}
+            for service_name, service_data in self.service_checker.endpoints['categories'].items():
+                if isinstance(service_data, dict) and 'endpoints' in service_data:
+                    for endpoint_data in service_data['endpoints']:
+                        domain = endpoint_data.get('domain', '')
+                        if domain:
+                            all_endpoints[(service_name, domain)] = endpoint_data
+            
+            # Process the results
+            rows_to_add = []
+            
+            # First, process DNS checks
             for service_name, service_data in results.items():
-                # Process DNS checks
                 for dns_check in service_data.get('dns_checks', []):
+
+
                     domain = dns_check.get('endpoint', '')
                     result = dns_check.get('result', {})
                     is_healthy = result.get('success', False)
                     latency = result.get('response_time', 0)
                     error = result.get('error', '')
-                    
-                    check_info = self.get_check_type_info('DNS', {'DNS': True})
+
+                    check_info = self.get_check_type_info("DNS", {"DNS": False})
                     detail_msg = self.format_detail_message(None, latency, error, is_healthy)
+
                     
                     row_data = [
                         is_healthy,
@@ -1199,6 +1849,8 @@ class DashboardWindow(QMainWindow):
                         check_info,
                         detail_msg
                     ]
+                    
+                    processed_endpoints.add((service_name, domain))
                     
                     if is_healthy:
                         healthy_rows.append(row_data)
@@ -1229,7 +1881,7 @@ class DashboardWindow(QMainWindow):
                     elif port == '995':
                         protocol = 'POP3'
                     
-                    check_info = self.get_check_type_info(protocol, {protocol: False})  # Port check only
+                    check_info = self.get_check_type_info(protocol, {protocol: False})
                     detail_msg = self.format_detail_message(None, latency, error, is_healthy)
                     
                     row_data = [
@@ -1241,6 +1893,8 @@ class DashboardWindow(QMainWindow):
                         check_info,
                         detail_msg
                     ]
+                    
+                    processed_endpoints.add((service_name, domain))
                     
                     if is_healthy:
                         healthy_rows.append(row_data)
@@ -1261,7 +1915,7 @@ class DashboardWindow(QMainWindow):
                     domain = endpoint.split('://')[-1].split('/')[0]
                     port = '443' if protocol == 'HTTPS' else '80'
                     
-                    check_info = self.get_check_type_info(protocol, {protocol: True})  # Full protocol check
+                    check_info = self.get_check_type_info(protocol, {protocol: True})
                     detail_msg = self.format_detail_message(status_code, latency, error, is_healthy)
                     
                     row_data = [
@@ -1274,44 +1928,70 @@ class DashboardWindow(QMainWindow):
                         detail_msg
                     ]
                     
+                    processed_endpoints.add((service_name, domain))
+                    
                     if is_healthy:
                         healthy_rows.append(row_data)
                     else:
                         unhealthy_rows.append(row_data)
+            
+            # Add entries for endpoints that haven't been processed yet
+            for (service_name, domain), config in all_endpoints.items():
+                if (service_name, domain) not in processed_endpoints:
+                    # Add a row for each configured port
+                    for port_config in config['ports']:
+                        protocol = port_config.get('protocol', 'TCP')
+                        port = port_config.get('port', '')
+                        
+                        check_info = self.get_check_type_info(protocol, {protocol: False})
+                        detail_msg = "No recent check data available"
+                        
+                        row_data = [
+                            False,  # Mark as unhealthy since we have no data
+                            service_name,
+                            domain,
+                            protocol,
+                            str(port),
+                            check_info,
+                            detail_msg
+                        ]
+                        
+                        unhealthy_rows.append(row_data)
+            
+            # Add all rows to table
+            all_rows = unhealthy_rows + healthy_rows
+            
+            for row_data in all_rows:
+                row_position = self.detailed_table.rowCount()
+                self.detailed_table.insertRow(row_position)
+                
+                # Status icon
+                status_label = QLabel()
+                status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                status_label.setStyleSheet(
+                    "background-color: #4CAF50; border-radius: 10px;" if row_data[0] 
+                    else "background-color: #F44336; border-radius: 10px;"
+                )
+                status_label.setText("✓" if row_data[0] else "✗")
+                self.detailed_table.setCellWidget(row_position, 0, status_label)
+                
+                # Other columns
+                for col in range(1, len(row_data)):
+                    if col == 5:  # Check Type column
+                        check_type, icon, color, tooltip = row_data[col]
+                        check_label = QLabel(f"{icon} {check_type}")
+                        check_label.setStyleSheet(f"color: {color}; padding: 2px 6px;")
+                        check_label.setToolTip(tooltip)
+                        self.detailed_table.setCellWidget(row_position, col, check_label)
+                    else:
+                        item = QTableWidgetItem(str(row_data[col]))
+                        if col == 6:  # Details column
+                            item.setToolTip(str(row_data[col]))
+                        self.detailed_table.setItem(row_position, col, item)
         
         except Exception as e:
             logger.error(f"Error updating detailed table: {str(e)}", exc_info=True)
-        
-        # Add all rows to table
-        all_rows = unhealthy_rows + healthy_rows
-        
-        for row_data in all_rows:
-            row_position = self.detailed_table.rowCount()
-            self.detailed_table.insertRow(row_position)
-            
-            # Status icon
-            status_label = QLabel()
-            status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            status_label.setStyleSheet(
-                "background-color: #4CAF50; border-radius: 10px;" if row_data[0] 
-                else "background-color: #F44336; border-radius: 10px;"
-            )
-            status_label.setText("✓" if row_data[0] else "✗")
-            self.detailed_table.setCellWidget(row_position, 0, status_label)
-            
-            # Other columns
-            for col in range(1, len(row_data)):
-                if col == 5:  # Check Type column
-                    check_type, icon, color, tooltip = row_data[col]
-                    check_label = QLabel(f"{icon} {check_type}")
-                    check_label.setStyleSheet(f"color: {color}; padding: 2px 6px;")
-                    check_label.setToolTip(tooltip)
-                    self.detailed_table.setCellWidget(row_position, col, check_label)
-                else:
-                    item = QTableWidgetItem(str(row_data[col]))
-                    if col == 6:  # Details column
-                        item.setToolTip(str(row_data[col]))
-                    self.detailed_table.setItem(row_position, col, item)
+            traceback.print_exc()
         
         logger.info(f"Detailed table updated with {self.detailed_table.rowCount()} rows")
 
@@ -1346,7 +2026,7 @@ class DashboardWindow(QMainWindow):
         detail_msg = []
         if status_code:
             detail_msg.append(f"Status: {status_code}")
-        if latency > 0:
+        if latency is not None and latency > 0:
             detail_msg.append(f"Latency: {latency:.1f}ms")
         if error:
             detail_msg.append(f"Error: {error}")
@@ -1436,517 +2116,667 @@ class DashboardWindow(QMainWindow):
             
     def refresh_data(self):
         """Manually refresh data"""
-        results = self.service_checker.run_service_checks()
-        self.update_ui(results)
+        self.statusBar().showMessage("Refreshing data...")
+        # The data manager thread will handle the actual refresh
+        # and update the UI via signals
         
     def closeEvent(self, event):
         """Handle application close event"""
+        # Show a status message to indicate shutdown is in progress
+        self.statusBar().showMessage("Shutting down...")
+        
+        # Create a non-blocking cleanup process
+        QTimer.singleShot(0, self._perform_cleanup)
+        
+        # Accept the event to allow the window to close immediately
+        event.accept()
+    
+    def _perform_cleanup(self):
+        """Perform cleanup operations in a non-blocking way"""
         try:
-            # Clean up logs
-            if hasattr(self, 'log_manager'):
-                self.log_manager.cleanup()
-                logger.info("Log manager cleanup completed")
+            logger.info("Starting application shutdown sequence")
             
-            # Perform any other cleanup
-            if hasattr(self, 'service_checker'):
-                logger.info("Stopping service checker")
-                # Add any necessary service checker cleanup here
+            # Stop all loading widget animations
+            if hasattr(self, 'overview_loading'):
+                self.overview_loading.timer.stop()
+            if hasattr(self, 'detailed_loading'):
+                self.detailed_loading.timer.stop()
+            if hasattr(self, 'trends_loading'):
+                self.trends_loading.timer.stop()
             
-            logger.info("Application shutting down")
+            # Stop the data manager thread with a timeout
+            if hasattr(self, 'data_manager'):
+                logger.info("Stopping data manager thread")
+                self.data_manager.running = False
+                if not self.data_manager.wait(1000):  # Wait up to 1 second
+                    logger.warning("Data manager thread did not stop gracefully, terminating")
+                    self.data_manager.terminate()
+            
+            # Stop the service checker thread if it exists
+            if hasattr(self, 'checker_thread'):
+                logger.info("Stopping service checker thread")
+                self.checker_thread.running = False
+                if not self.checker_thread.wait(1000):  # Wait up to 1 second
+                    logger.warning("Service checker thread did not stop gracefully, terminating")
+                    self.checker_thread.terminate()
+            
+            # Clean up logs in a separate thread to avoid blocking
+            QTimer.singleShot(0, self._cleanup_logs)
+            
+            logger.info("Application shutdown sequence completed")
             
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
             traceback.print_exc()
-            
-        # Accept the close event
-        event.accept()
+    
+    def _cleanup_logs(self):
+        """Clean up logs in a separate operation"""
+        try:
+            # Clean up logs using the global log manager
+            global log_manager
+            if log_manager:
+                logger.info("Cleaning up logs")
+                log_manager.cleanup()
+                logger.info("Log cleanup completed")
+        except Exception as e:
+            logger.error(f"Error during log cleanup: {e}")
+            traceback.print_exc()
 
-    def initialize_data(self):
-        """Run initial checks to populate data"""
-        try:
-            logger.info("Initializing data...")
-            
-            # First, make sure the service_checker knows about the endpoints we want to monitor
-            if not hasattr(self.service_checker, 'endpoints') or not self.service_checker.endpoints:
-                # Log warning about missing endpoints
-                logger.warning("Warning: No endpoints defined in service_checker")
-            else:
-                # Count total endpoints across all services
-                endpoint_count = sum(len(service_data.get('endpoints', [])) 
-                                    for service_data in self.service_checker.endpoints.values())
-                logger.info(f"Found {len(self.service_checker.endpoints)} service categories with {endpoint_count} total endpoints")
-            
-            # Run initial service checks to populate data
-            try:
-                if hasattr(self.service_checker, 'run_service_checks'):
-                    logger.info("Running service checks...")
-                    results = self.service_checker.run_service_checks()
-                    logger.info(f"Service checks completed. Results: {len(results)} services")
-                    
-                    # Check if latency_history is properly initialized
-                    if hasattr(self.service_checker, 'latency_history'):
-                        # Wait up to 20 seconds for the checker thread to collect some real data
-                        wait_time = 0
-                        while wait_time < 20:
-                            # Check if any service has any endpoint with data
-                            has_data = False
-                            for service_data in self.service_checker.latency_history.values():
-                                if isinstance(service_data, dict) and any(len(endpoint_data) > 0 for endpoint_data in service_data.values() if hasattr(endpoint_data, '__len__')):
-                                    has_data = True
-                                    break
-                            
-                            if has_data:
-                                logger.info("Real latency data collected, proceeding with initialization")
-                                break
-                                
-                            time.sleep(1)
-                            wait_time += 1
-                            logger.info(f"Waiting for real data... {wait_time}s")
-                    else:
-                        logger.warning("No latency_history attribute in service_checker")
-                    
-                    # Dump raw latency data structure after running checks
-                    self.dump_latency_data()
-                    
-                    # Normalize the latency data format for compatibility with our display code
-                    self.normalize_latency_data()
-                    
-                    # Update latency graphs with initial data
-                    self.update_latency_graphs()
-                    
-                    # Update UI with real data
-                    self.update_ui(results)
-                else:
-                    logger.warning("Warning: service_checker doesn't have run_service_checks method")
-                    results = {}
-            except Exception as e:
-                logger.error(f"Error running service checks: {str(e)}")
-                traceback.print_exc()  # Print the full traceback for debugging
-                results = {}
-                
-        except Exception as e:
-            logger.error(f"Critical error initializing data: {str(e)}")
-            traceback.print_exc()  # Print the full traceback for debugging
-            # Only add test data in case of critical error
-            self.add_test_data()
-            
-    def normalize_latency_data(self):
-        """Normalize latency data format for compatibility with display code"""
-        if not hasattr(self.service_checker, 'latency_history'):
-            logger.warning("No latency_history attribute in service_checker")
-            return
-            
-        logger.info("Normalizing latency data format...")
+    def on_initialization_complete(self):
+        """Handle completion of data initialization"""
+        # Hide loading widgets and show content
+        self.overview_loading.hide()
+        self.detailed_loading.hide()
+        self.trends_loading.hide()
         
-        # Create a copy of the original structure to avoid modifying during iteration
-        original_structure = copy.deepcopy(self.service_checker.latency_history)
+        self.overview_table.show()
+        self.detailed_table.show()
         
-        # Process each service
-        for service_name, endpoints in original_structure.items():
-            logger.debug(f"Processing service: {service_name}")
-            
-            # Skip if not a dictionary
-            if not isinstance(endpoints, dict):
-                logger.warning(f"Unexpected data type for service {service_name}: {type(endpoints).__name__}, value: {endpoints}")
-                # Initialize as empty dict if not already a dict
-                self.service_checker.latency_history[service_name] = {}
-                continue
-                
-            # Process each endpoint
-            for endpoint_key, data in endpoints.items():
-                logger.debug(f"Processing endpoint: {endpoint_key}")
-                
-                # Skip if empty or not iterable
-                if not data or not hasattr(data, '__iter__'):
-                    logger.debug(f"Empty or non-iterable data for {endpoint_key}: {type(data).__name__}")
-                    continue
-                
-                try:
-                    # Convert data to list for inspection
-                    data_list = list(data)
-                    
-                    # Skip if empty after conversion
-                    if not data_list:
-                        logger.debug(f"Empty data list for {endpoint_key}")
-                        continue
-                    
-                    # Check if data is already in the correct format
-                    if isinstance(data, collections.deque) and all(
-                        isinstance(item, tuple) and len(item) >= 2 and 
-                        isinstance(item[0], datetime) and isinstance(item[1], (int, float))
-                        for item in data_list
-                    ):
-                        logger.debug(f"Data for {endpoint_key} is already in correct format")
-                        continue
-                    
-                    # Convert to the correct format if needed
-                    normalized_data = collections.deque(maxlen=240)
-                    now = datetime.now()
-                    
-                    # Handle different data formats
-                    if all(isinstance(item, (int, float)) for item in data_list):
-                        # Raw values without timestamps
-                        logger.info(f"Converting raw values to (timestamp, value) format for {endpoint_key}")
-                        for i, value in enumerate(reversed(data_list)):
-                            timestamp = now - timedelta(seconds=i * 15)
-                            normalized_data.appendleft((timestamp, float(value)))
-                    elif all(isinstance(item, tuple) and len(item) >= 2 for item in data_list):
-                        # Tuples that might need timestamp conversion
-                        logger.info(f"Converting tuple format for {endpoint_key}")
-                        for item in data_list:
-                            timestamp = item[0] if isinstance(item[0], datetime) else now
-                            value = float(item[1]) if isinstance(item[1], (int, float)) else 0.0
-                            normalized_data.append((timestamp, value))
-                    else:
-                        # Unknown format - log and skip
-                        logger.warning(f"Unknown data format for {endpoint_key}: {data_list[:3]}")
-                        continue
-                    
-                    # Replace the data with normalized format
-                    self.service_checker.latency_history[service_name][endpoint_key] = normalized_data
-                    logger.debug(f"Converted {len(normalized_data)} data points for {endpoint_key}")
-                    
-                except Exception as e:
-                    logger.error(f"Error normalizing data for {endpoint_key}: {str(e)}")
-                    logger.error(f"Data type: {type(data).__name__}, Sample: {str(data)[:100]}")
-                    traceback.print_exc()
-        
-        logger.info("Latency data normalization complete")
-            
-    def dump_latency_data(self):
-        """Dump the latency data structure to the log for debugging"""
-        if not hasattr(self.service_checker, 'latency_history'):
-            logger.warning("No latency_history attribute in service_checker")
-            return
-            
-        logger.info("Dumping latency_history structure:")
-        logger.info(f"Top-level keys (services): {list(self.service_checker.latency_history.keys())}")
-        
-        # Get the core endpoints if available
-        key_endpoints = []
-        if hasattr(self, 'core_endpoints') and self.core_endpoints:
-            key_endpoints = self.core_endpoints
+        # Check if trends_scroll exists before showing it
+        if hasattr(self, 'trends_scroll'):
+            self.trends_scroll.show()
         else:
-            # Try to extract endpoints from the service checker
-            if hasattr(self.service_checker, 'endpoints'):
-                for service_name, service_data in self.service_checker.endpoints.items():
-                    for endpoint_data in service_data.get('endpoints', []):
-                        domain = endpoint_data.get('domain', '')
-                        if domain:
-                            key_endpoints.append(domain)
+            logger.warning("trends_scroll widget does not exist during initialization_complete")
         
-        logger.info(f"Looking for data for {len(key_endpoints)} key endpoints")
-        
-        # Check for each service
-        for service_name in self.service_checker.latency_history:
-            logger.info(f"Service: {service_name}")
-            endpoints = self.service_checker.latency_history[service_name]
-            
-            if isinstance(endpoints, dict):
-                logger.info(f"  Endpoints: {list(endpoints.keys())}")
-                
-                # Check a few sample endpoints
-                for endpoint_key in list(endpoints.keys())[:3]:  # Limit to first 3 for brevity
-                    data = endpoints[endpoint_key]
-                    logger.info(f"  Endpoint: {endpoint_key}")
-                    
-                    if hasattr(data, '__len__'):
-                        logger.info(f"    Data points: {len(data)}")
-                        if len(data) > 0:
-                            try:
-                                samples = list(data)[:3] if hasattr(data, '__iter__') else data[:3]
-                                logger.info(f"    Sample data: {samples}")
-                            except (IndexError, TypeError) as e:
-                                logger.warning(f"    Error sampling data: {e}")
-                    else:
-                        logger.info(f"    Data type: {type(data).__name__}, value: {data}")
-            else:
-                logger.info(f"  Unexpected data type for endpoints: {type(endpoints).__name__}, value: {endpoints}")
-        
-        # Check for specific endpoints
-        for endpoint in key_endpoints:
-            # Check each service for this endpoint
-            found = False
-            for service_name, endpoints in self.service_checker.latency_history.items():
-                if not isinstance(endpoints, dict):
-                    logger.warning(f"  Service {service_name} has non-dict endpoints: {type(endpoints).__name__}")
-                    continue
-                    
-                # Look for exact or partial matches
-                for endpoint_key in endpoints:
-                    if endpoint in endpoint_key or endpoint_key in endpoint:
-                        data = endpoints[endpoint_key]
-                        logger.info(f"Found data for {endpoint} under service {service_name}, key: {endpoint_key}")
-                        
-                        if hasattr(data, '__len__'):
-                            logger.info(f"  Contains {len(data)} data points")
-                            if len(data) > 0:
-                                try:
-                                    samples = list(data)[:3] if hasattr(data, '__iter__') else data[:3]
-                                    logger.info(f"  Samples: {samples}")
-                                except (IndexError, TypeError) as e:
-                                    logger.warning(f"  Error sampling data: {e}")
-                        else:
-                            logger.info(f"  Data type: {type(data).__name__}, value: {data}")
-                        
-                        found = True
-                        break
-                
-                if found:
-                    break
-            
-            if not found:
-                logger.info(f"No data found for {endpoint}")
-    
-    def add_test_data(self):
-        """Add test data for development purposes"""
-        try:
-            logger.info("Adding test data for development")
-            print("Adding test data...")
-            
-            # Get current time for test data
-            current_time = datetime.now()
-            
-            # Make sure we have core endpoints defined
-            if not hasattr(self, 'core_endpoints') or not self.core_endpoints:
-                logger.warning("No core endpoints defined, getting them from service checker")
-                self.core_endpoints = self.get_core_endpoints()
-                
-            if not self.core_endpoints:
-                logger.error("No endpoints available for test data")
-                return
-                
-            # Domain to service mapping for test data
-            domain_service_map = {}
-            
-            # Create test data for each endpoint
-            for endpoint in self.core_endpoints:
-                logger.info(f"Creating test data for {endpoint}")
-                
-                # Get the service for this endpoint
-                service_name = None
-                if hasattr(self.service_checker, 'get_service_for_domain'):
-                    service_name = self.service_checker.get_service_for_domain(endpoint)
-                
-                if not service_name:
-                    # Fallback to inferring service name
-                    if 'teams' in endpoint:
-                        service_name = 'Microsoft Teams'
-                    elif 'outlook' in endpoint or 'office365' in endpoint:
-                        service_name = 'Exchange Online'
-                    elif 'sharepoint' in endpoint or 'onedrive' in endpoint:
-                        service_name = 'SharePoint & OneDrive'
-                    elif 'graph' in endpoint or 'login' in endpoint or 'microsoftonline' in endpoint:
-                        service_name = 'Microsoft Graph'
-                    else:
-                        service_name = 'Other Services'
-                
-                # Create or update the endpoint in latency_history
-                if service_name not in self.service_checker.latency_history:
-                    self.service_checker.latency_history[service_name] = {}
-                
-                # Generate test data points for the last 15 minutes
-                test_latency = []
-                for i in range(60):  # 15 minutes (60 points at 15s intervals)
-                    point_time = current_time - timedelta(seconds=15*i)
-                    # Generate random latency between 40-80ms with some spikes
-                    latency = 50 + 30 * (0.5 - 0.5 * (i % 10 == 0))  # Spike every 10th point
-                    test_latency.append((point_time, latency))
-                
-                # Add latest point with high latency to test alerts
-                test_latency.insert(0, (current_time, 150))
-                
-                # Create a collections.deque for the test data
-                endpoint_with_port = f"{endpoint}:443"
-                self.service_checker.latency_history[service_name][endpoint_with_port] = collections.deque(test_latency, maxlen=240)
-                
-                # Also add HTTP protocol data for endpoints that support it
-                if any(p in endpoint for p in ['teams', 'sharepoint', 'onedrive']):
-                    http_endpoint = f"{endpoint}:HTTP"
-                    self.service_checker.latency_history[service_name][http_endpoint] = collections.deque(test_latency, maxlen=240)
-                
-                logger.info(f"Added {len(test_latency)} test data points for {endpoint}")
-                
-                # Add to domain mapping
-                domain_service_map[endpoint] = service_name
-                
-            # Log the structure of the latency_history
-            logger.debug(f"latency_history structure: {self.service_checker.latency_history.keys()}")
-            for domain in self.service_checker.latency_history:
-                logger.debug(f"  {domain} protocols: {self.service_checker.latency_history[domain].keys()}")
-            
-            # Add domain mappings to ServiceChecker 
-            # (needed because the checker stores data by domain but looks up by endpoint)
-            if not hasattr(self.service_checker, 'domain_service_map'):
-                self.service_checker.domain_service_map = domain_service_map
-            else:
-                # Update existing map
-                self.service_checker.domain_service_map.update(domain_service_map)
-            
-            # Create test results structure
-            test_results = self.create_test_results()
-            
-            # Store these results in the service checker for consistency
-            if hasattr(self.service_checker, 'last_results'):
-                self.service_checker.last_results = test_results
-            
-            # Dump the test results structure to the log
-            logger.debug(f"Test results structure: {list(test_results.keys())}")
-            for service in test_results:
-                logger.debug(f"  Service {service} has {len(test_results[service].get('endpoints', []))} endpoints")
-                
-            # Update UI with test data
-            self.update_ui(test_results)
-            
-            logger.info("Test data added successfully")
-        except Exception as e:
-            logger.error(f"Error adding test data: {str(e)}", exc_info=True)
-            print(f"Error adding test data: {str(e)}")
-    
-    def create_test_results(self):
-        """Create test results data structure for development"""
-        test_results = {}
-        
-        # Make sure we have core endpoints defined
-        if not hasattr(self, 'core_endpoints') or not self.core_endpoints:
-            logger.warning("No core endpoints defined, getting them from service checker")
-            self.core_endpoints = self.get_core_endpoints()
-            
-        if not self.core_endpoints:
-            logger.error("No endpoints available for test results")
-            return {}
-            
-        # Process each endpoint
-        for endpoint in self.core_endpoints:
-            # Get the service for this endpoint
-            service_name = None
-            if hasattr(self.service_checker, 'get_service_for_domain'):
-                service_name = self.service_checker.get_service_for_domain(endpoint)
-            
-            if not service_name:
-                # Fallback to inferring service name
-                if 'teams' in endpoint:
-                    service_name = 'Microsoft Teams'
-                elif 'outlook' in endpoint or 'office365' in endpoint:
-                    service_name = 'Exchange Online'
-                elif 'sharepoint' in endpoint or 'onedrive' in endpoint:
-                    service_name = 'SharePoint & OneDrive'
-                elif 'graph' in endpoint or 'login' in endpoint or 'microsoftonline' in endpoint:
-                    service_name = 'Microsoft Graph'
-                else:
-                    service_name = 'Other Services'
-            
-            # Create service entry if it doesn't exist
-            if service_name not in test_results:
-                test_results[service_name] = {
-                    'endpoints': []
-                }
-            
-            # Create endpoint data
-            endpoint_data = {
-                'domain': endpoint,
-                'http_check': True,
-                'ports': []
-            }
-            
-            # Add HTTPS port by default
-            https_port = {
-                'port': 443,
-                'protocol': 'HTTPS',
-                'is_healthy': True,
-                'latency': 65.0,
-                'error': ''
-            }
-            endpoint_data['ports'].append(https_port)
-            
-            # Add HTTP port for certain services
-            if any(p in endpoint for p in ['teams', 'sharepoint', 'onedrive']):
-                http_port = {
-                    'port': 80,
-                    'protocol': 'HTTP',
-                    'is_healthy': True,
-                    'latency': 60.0,
-                    'error': ''
-                }
-                endpoint_data['ports'].append(http_port)
-            
-            # Add an unhealthy SMTP port to Exchange Online for testing
-            if 'outlook.office365.com' in endpoint:
-                smtp_port = {
-                    'port': 587,
-                    'protocol': 'SMTP-TLS',
-                    'is_healthy': False,
-                    'latency': 0.0,
-                    'error': 'Connection timed out'
-                }
-                endpoint_data['ports'].append(smtp_port)
-            
-            # Add endpoint to service
-            test_results[service_name]['endpoints'].append(endpoint_data)
-        
-        return test_results
+        self.statusBar().showMessage("Ready")
+        logger.info("Initialization complete. UI updated to show content.")
 
     def show_add_endpoint_dialog(self):
-        """Show the dialog for adding a new endpoint"""
+        """Show dialog for adding a new endpoint and process the result"""
         dialog = AddEndpointDialog(self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.add_new_endpoint(dialog.get_endpoint_data())
-            
-    def add_new_endpoint(self, endpoint_data):
-        """Add a new endpoint to the endpoints.json file and refresh the UI"""
+        if dialog.exec():
+            try:
+                # Get the endpoint data from the dialog
+                endpoint_data = dialog.get_endpoint_data()
+                
+                # Validate required fields
+                if not endpoint_data['endpoint']['domain']:
+                    raise ValueError("Domain/URL is required")
+                
+                # Show status message
+                self.statusBar().showMessage("Adding new endpoint...")
+                
+                # Load current endpoints
+                try:
+                    with open('endpoints.json', 'r') as f:
+                        endpoints = json.load(f)
+                except (FileNotFoundError, json.JSONDecodeError):
+                    # Create a new endpoints structure if file doesn't exist or is invalid
+                    endpoints = {"categories": {}}
+                
+                # Ensure we have the categories structure
+                if "categories" not in endpoints:
+                    endpoints["categories"] = {}
+                
+                # Get the service name and ensure it exists in the categories
+                service_name = endpoint_data['service']
+                if service_name not in endpoints["categories"]:
+                    endpoints["categories"][service_name] = {
+                        "description": f"Endpoints for {service_name}",
+                        "endpoints": []
+                    }
+                elif "endpoints" not in endpoints["categories"][service_name]:
+                    endpoints["categories"][service_name]["endpoints"] = []
+                
+                # Add new endpoint to the appropriate service
+                endpoints["categories"][service_name]["endpoints"].append(endpoint_data['endpoint'])
+                
+                # Save updated endpoints
+                with open('endpoints.json', 'w') as f:
+                    json.dump(endpoints, f, indent=4)
+                
+                logger.info(f"Saved updated endpoints.json with new endpoint: {endpoint_data['endpoint']['domain']}")
+                
+                # Stop current checks
+                if hasattr(self, 'data_manager'):
+                    logger.info("Stopping current data manager")
+                    self.data_manager.running = False
+                    self.data_manager.wait()
+                
+                # Recreate the service checker with the updated endpoints
+                logger.info("Creating new ServiceChecker instance")
+                self.service_checker = ServiceChecker("endpoints.json")
+                
+                # Verify if endpoints loaded correctly
+                if 'categories' in self.service_checker.endpoints:
+                    logger.info(f"ServiceChecker loaded with categories: {list(self.service_checker.endpoints['categories'].keys())}")
+                else:
+                    logger.warning("ServiceChecker does not have 'categories' in endpoints structure")
+                
+                # Create and start new data manager
+                logger.info("Creating new DataManagerThread")
+                self.data_manager = DataManagerThread(self.service_checker)
+                self.data_manager.data_ready.connect(self.update_ui)
+                self.data_manager.latency_updated.connect(self.update_latency_graphs)
+                self.data_manager.status_message.connect(self.statusBar().showMessage)
+                self.data_manager.initialization_complete.connect(self.on_initialization_complete)
+                
+                # Show loading states
+                self.overview_loading.show()
+                self.detailed_loading.show()
+                self.trends_loading.show()
+                self.overview_table.hide()
+                self.detailed_table.hide()
+                if hasattr(self, 'trends_scroll'):
+                    self.trends_scroll.hide()
+                
+                # Start the new data manager
+                logger.info("Starting data manager")
+                self.data_manager.start()
+                
+                self.statusBar().showMessage(f"New endpoint {endpoint_data['endpoint']['domain']} added successfully")
+                logger.info(f"Added new endpoint: {endpoint_data['endpoint']['domain']}")
+                
+            except Exception as e:
+                logger.error(f"Error adding new endpoint: {str(e)}", exc_info=True)
+                QMessageBox.critical(self, "Error", f"Failed to add endpoint: {str(e)}")
+                self.statusBar().showMessage("Failed to add endpoint")
+    
+    def show_remove_endpoint_dialog(self):
+        """Show dialog for removing endpoints or ports and process the result"""
         try:
             # Load current endpoints
-            with open('endpoints.json', 'r') as f:
-                endpoints = json.load(f)
-                
-            # Get the service category
-            service = endpoint_data['service']
+            try:
+                with open('endpoints.json', 'r') as f:
+                    endpoints = json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                QMessageBox.warning(
+                    self,
+                    "Error",
+                    "Could not load endpoints.json file.",
+                    QMessageBox.StandardButton.Ok
+                )
+                return
             
-            # Create category if it doesn't exist
+            # Create and show the dialog
+            dialog = RemoveEndpointDialog(endpoints, self)
+            if dialog.exec():
+                # Get the removal data
+                removal_data = dialog.get_removal_data()
+                
+                # Create a backup of the current endpoints file
+                self.create_endpoints_backup()
+                
+                # Process the removal based on the type
+                if removal_data['type'] == 'category':
+                    self.remove_category(endpoints, removal_data['category'])
+                elif removal_data['type'] == 'endpoint':
+                    self.remove_endpoint(endpoints, removal_data['category'], removal_data['endpoint'])
+                elif removal_data['type'] == 'ports':
+                    self.remove_ports(endpoints, removal_data['category'], removal_data['endpoint'], removal_data['ports'])
+                
+                # Save the updated endpoints
+                self.save_endpoints(endpoints)
+                
+                # Reload the service checker
+                self.reload_service_checker()
+                
+                # Show success message
+                QMessageBox.information(
+                    self,
+                    "Success",
+                    "Endpoints have been updated successfully.",
+                    QMessageBox.StandardButton.Ok
+                )
+        except Exception as e:
+            logger.error(f"Error in show_remove_endpoint_dialog: {str(e)}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"An error occurred: {str(e)}",
+                QMessageBox.StandardButton.Ok
+            )
+    
+    def create_endpoints_backup(self):
+        """Create a backup of the endpoints.json file"""
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_filename = f"endpoints_backup_{timestamp}.json"
+            
+            # Copy the current file to the backup
+            if os.path.exists('endpoints.json'):
+                with open('endpoints.json', 'r') as src, open(backup_filename, 'w') as dst:
+                    dst.write(src.read())
+                
+                logger.info(f"Created backup of endpoints.json as {backup_filename}")
+                return backup_filename
+            else:
+                logger.warning("endpoints.json does not exist, no backup created")
+                return None
+        except Exception as e:
+            logger.error(f"Error creating backup: {str(e)}", exc_info=True)
+            raise
+    
+    def remove_category(self, endpoints, category_name):
+        """Remove an entire category from the endpoints data"""
+        if 'categories' in endpoints and category_name in endpoints['categories']:
+            del endpoints['categories'][category_name]
+            logger.info(f"Removed category: {category_name}")
+        else:
+            logger.warning(f"Category not found: {category_name}")
+    
+    def remove_endpoint(self, endpoints, category_name, endpoint_domain):
+        """Remove an endpoint from a category"""
+        if 'categories' in endpoints and category_name in endpoints['categories']:
+            category = endpoints['categories'][category_name]
+            if 'endpoints' in category:
+                # Find the endpoint by domain
+                for i, endpoint in enumerate(category['endpoints']):
+                    if endpoint.get('domain') == endpoint_domain:
+                        # Remove the endpoint
+                        category['endpoints'].pop(i)
+                        logger.info(f"Removed endpoint: {endpoint_domain} from category: {category_name}")
+                        return
+                
+                logger.warning(f"Endpoint not found: {endpoint_domain} in category: {category_name}")
+            else:
+                logger.warning(f"No endpoints in category: {category_name}")
+        else:
+            logger.warning(f"Category not found: {category_name}")
+    
+    def remove_ports(self, endpoints, category_name, endpoint_domain, ports_to_remove):
+        """Remove specific ports from an endpoint"""
+        if 'categories' in endpoints and category_name in endpoints['categories']:
+            category = endpoints['categories'][category_name]
+            if 'endpoints' in category:
+                # Find the endpoint by domain
+                for endpoint in category['endpoints']:
+                    if endpoint.get('domain') == endpoint_domain:
+                        if 'ports' in endpoint:
+                            # Create a new list of ports excluding the ones to remove
+                            new_ports = []
+                            for port_info in endpoint['ports']:
+                                # Check if this port should be removed
+                                should_remove = False
+                                for port_to_remove in ports_to_remove:
+                                    if (port_info.get('port') == port_to_remove.get('port') and 
+                                        port_info.get('protocol') == port_to_remove.get('protocol')):
+                                        should_remove = True
+                                        break
+                                
+                                if not should_remove:
+                                    new_ports.append(port_info)
+                            
+                            # Update the endpoint with the new ports list
+                            endpoint['ports'] = new_ports
+                            
+                            # If no ports remain, remove the endpoint
+                            if not new_ports:
+                                self.remove_endpoint(endpoints, category_name, endpoint_domain)
+                                logger.info(f"Removed endpoint {endpoint_domain} as it has no remaining ports")
+                            else:
+                                logger.info(f"Removed ports from endpoint: {endpoint_domain}")
+                            
+                            return
+                
+                logger.warning(f"Endpoint not found: {endpoint_domain} in category: {category_name}")
+            else:
+                logger.warning(f"No endpoints in category: {category_name}")
+        else:
+            logger.warning(f"Category not found: {category_name}")
+    
+    def save_endpoints(self, endpoints):
+        """Save the updated endpoints to the JSON file"""
+        try:
+            # Validate the endpoints structure
             if 'categories' not in endpoints:
-                endpoints['categories'] = {}
-            if service not in endpoints['categories']:
-                endpoints['categories'][service] = {
-                    'description': f'Endpoints for {service}',
-                    'endpoints': []
-                }
-                
-            # Add the new endpoint
-            endpoints['categories'][service]['endpoints'].append(endpoint_data['endpoint'])
+                raise ValueError("Invalid endpoints structure: 'categories' key is missing")
             
-            # Save updated endpoints
+            # Save the updated endpoints
             with open('endpoints.json', 'w') as f:
                 json.dump(endpoints, f, indent=4)
+            
+            logger.info("Saved updated endpoints.json")
+        except Exception as e:
+            logger.error(f"Error saving endpoints: {str(e)}", exc_info=True)
+            raise
+    
+    def reload_service_checker(self):
+        """Reload the service checker with the updated endpoints"""
+        try:
+            # Stop current checks
+            if hasattr(self, 'data_manager'):
+                logger.info("Stopping current data manager")
+                self.data_manager.running = False
+                self.data_manager.wait()
+            
+            # Recreate the service checker with the updated endpoints
+            logger.info("Creating new ServiceChecker instance")
+            self.service_checker = ServiceChecker("endpoints.json")
+            
+            # Verify if endpoints loaded correctly
+            if 'categories' in self.service_checker.endpoints:
+                logger.info(f"ServiceChecker loaded with categories: {list(self.service_checker.endpoints['categories'].keys())}")
+            else:
+                logger.warning("ServiceChecker does not have 'categories' in endpoints structure")
+            
+            # Create and start new data manager
+            logger.info("Creating new DataManagerThread")
+            self.data_manager = DataManagerThread(self.service_checker)
+            self.data_manager.data_ready.connect(self.update_ui)
+            self.data_manager.latency_updated.connect(self.update_latency_graphs)
+            self.data_manager.status_message.connect(self.statusBar().showMessage)
+            self.data_manager.initialization_complete.connect(self.on_initialization_complete)
+            
+            # Show loading states
+            self.overview_loading.show()
+            self.detailed_loading.show()
+            self.trends_loading.show()
+            self.overview_table.hide()
+            self.detailed_table.hide()
+            
+            # Start the data manager
+            self.data_manager.start()
+        except Exception as e:
+            logger.error(f"Error reloading service checker: {str(e)}", exc_info=True)
+            raise
+    
+    def show_restore_backup_dialog(self):
+        """Show dialog for restoring from a backup file"""
+        try:
+            # Find all backup files
+            backup_files = []
+            for file in os.listdir():
+                if file.startswith("endpoints_backup_") and file.endswith(".json"):
+                    backup_files.append(file)
+            
+            if not backup_files:
+                QMessageBox.information(
+                    self,
+                    "No Backups",
+                    "No backup files found.",
+                    QMessageBox.StandardButton.Ok
+                )
+                return
+            
+            # Sort backups by timestamp (newest first)
+            backup_files.sort(reverse=True)
+            
+            # Create a simple dialog to select a backup
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Restore from Backup")
+            dialog.setMinimumWidth(400)
+            
+            layout = QVBoxLayout(dialog)
+            
+            # Add a label
+            label = QLabel("Select a backup file to restore:")
+            layout.addWidget(label)
+            
+            # Add a list widget with backup files
+            list_widget = QListWidget()
+            for file in backup_files:
+                # Extract timestamp from filename
+                timestamp_str = file.replace("endpoints_backup_", "").replace(".json", "")
+                try:
+                    # Convert timestamp to readable format
+                    timestamp = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
+                    display_text = f"{timestamp.strftime('%Y-%m-%d %H:%M:%S')} ({file})"
+                except ValueError:
+                    display_text = file
                 
-            # Reload endpoints in service checker
-            self.service_checker.endpoints = self.service_checker.load_endpoints('endpoints.json')
+                item = QListWidgetItem(display_text)
+                item.setData(Qt.ItemDataRole.UserRole, file)
+                list_widget.addItem(item)
             
-            # Rebuild domain service map
-            self.service_checker.build_domain_service_map()
+            list_widget.setCurrentRow(0)  # Select the newest backup by default
+            layout.addWidget(list_widget)
             
-            # Initialize latency history for new endpoint
-            self.service_checker._initialize_latency_history()
+            # Add warning label
+            warning = QLabel("Warning: This will overwrite your current endpoints configuration.")
+            warning.setStyleSheet("color: #ff5252; font-weight: bold;")
+            layout.addWidget(warning)
             
-            # Refresh the latency trends tab
-            self.refresh_latency_tab()
+            # Add buttons
+            button_layout = QHBoxLayout()
+            cancel_button = QPushButton("Cancel")
+            cancel_button.clicked.connect(dialog.reject)
             
-            # Show success message
-            QMessageBox.information(self, "Success", "New endpoint added successfully!")
+            restore_button = QPushButton("Restore")
+            
+            button_layout.addWidget(cancel_button)
+            button_layout.addWidget(restore_button)
+            layout.addLayout(button_layout)
+            
+            # Connect restore button to a function that gets the selected backup
+            def on_restore_clicked():
+                selected_items = list_widget.selectedItems()
+                if selected_items:
+                    selected_file = selected_items[0].data(Qt.ItemDataRole.UserRole)
+                    dialog.accept()
+                    self.restore_from_backup(selected_file)
+            
+            restore_button.clicked.connect(on_restore_clicked)
+            
+            # Show the dialog
+            dialog.exec()
             
         except Exception as e:
-            logger.error(f"Error adding new endpoint: {str(e)}")
-            QMessageBox.critical(self, "Error", f"Failed to add endpoint: {str(e)}")
+            logger.error(f"Error in show_restore_backup_dialog: {str(e)}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"An error occurred: {str(e)}",
+                QMessageBox.StandardButton.Ok
+            )
+    
+    def restore_from_backup(self, backup_file):
+        """Restore endpoints from a backup file"""
+        try:
+            # Confirm restoration
+            confirm = QMessageBox.question(
+                self,
+                "Confirm Restore",
+                f"Are you sure you want to restore from {backup_file}?\n"
+                "This will overwrite your current endpoints configuration.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
             
-    def refresh_latency_tab(self):
-        """Refresh the latency trends tab with the new endpoint"""
-        # Remove existing latency tab
-        for i in range(self.tabs.count()):
-            if self.tabs.tabText(i) == "Latency Trends":
-                self.tabs.removeTab(i)
-                break
-                
-        # Recreate the latency trends tab
-        self.setup_latency_trends_tab()
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
+            
+            # Create a backup of the current file before restoring
+            current_backup = self.create_endpoints_backup()
+            
+            # Load the backup file
+            with open(backup_file, 'r') as f:
+                backup_data = json.load(f)
+            
+            # Validate the backup data
+            if 'categories' not in backup_data:
+                raise ValueError("Invalid backup file: 'categories' key is missing")
+            
+            # Save the backup data as the new endpoints.json
+            with open('endpoints.json', 'w') as f:
+                json.dump(backup_data, f, indent=4)
+            
+            logger.info(f"Restored endpoints from backup: {backup_file}")
+            
+            # Reload the service checker
+            self.reload_service_checker()
+            
+            # Show success message
+            QMessageBox.information(
+                self,
+                "Success",
+                f"Successfully restored from {backup_file}.\n"
+                f"A backup of your previous configuration was created as {current_backup}.",
+                QMessageBox.StandardButton.Ok
+            )
+            
+        except Exception as e:
+            logger.error(f"Error restoring from backup: {str(e)}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to restore from backup: {str(e)}",
+                QMessageBox.StandardButton.Ok
+            )
+
+class DataManagerThread(QThread):
+    """Thread for managing all data processing and service checks"""
+    data_ready = pyqtSignal(dict)  # Signal emitted when new data is ready
+    latency_updated = pyqtSignal()  # Signal emitted when latency data is updated
+    initialization_complete = pyqtSignal()  # Signal emitted when initial setup is done
+    status_message = pyqtSignal(str)  # Signal for updating status bar
+    
+    def __init__(self, service_checker):
+        super().__init__()
+        self.service_checker = service_checker
+        self.running = True
+        self.check_interval = 15000  # 15 seconds between checks
         
-        # Run service checks to start collecting data
-        self.refresh_data() 
+    def run(self):
+        """Main thread loop"""
+        try:
+            # Initial setup
+            self.status_message.emit("Loading endpoints...")
+            
+            # Initialize service checker
+            if not hasattr(self.service_checker, 'endpoints') or not self.service_checker.endpoints:
+                self.status_message.emit("No endpoints defined")
+                logger.warning("No endpoints defined in service checker")
+                endpoint_count = 0
+            else:
+                # Count endpoints with the correct structure
+                endpoint_count = 0
+                if 'categories' in self.service_checker.endpoints:
+                    for service_name, service_data in self.service_checker.endpoints['categories'].items():
+                        if isinstance(service_data, dict) and 'endpoints' in service_data:
+                            endpoint_count += len(service_data['endpoints'])
+                
+                logger.info(f"Found {endpoint_count} endpoints in service checker")
+            
+            # Run initial service checks
+            self.status_message.emit("Running initial service checks...")
+            results = self.service_checker.run_service_checks()
+            logger.info(f"Initial service checks completed for {len(results)} services")
+            
+            # Initialize latency history
+            if hasattr(self.service_checker, 'latency_history'):
+                self.status_message.emit("Collecting initial latency data...")
+                # Wait for some initial data
+                wait_time = 0
+                while wait_time < 20 and self.running:
+                    has_data = False
+                    for service_data in self.service_checker.latency_history.values():
+                        if isinstance(service_data, dict) and any(len(endpoint_data) > 0 
+                            for endpoint_data in service_data.values() if hasattr(endpoint_data, '__len__')):
+                            has_data = True
+                            break
+                    
+                    if has_data:
+                        break
+                        
+                    self.msleep(1000)  # Sleep for 1 second
+                    wait_time += 1
+                    self.status_message.emit(f"Collecting data... {wait_time}s")
+            
+            # Normalize data format
+            self.normalize_latency_data()
+            
+            # Signal that initialization is complete
+            self.initialization_complete.emit()
+            
+            # Emit initial data
+            self.data_ready.emit(results)
+            self.latency_updated.emit()
+            
+            # Main loop
+            while self.running:
+                try:
+                    # Run service checks
+                    results = self.service_checker.run_service_checks()
+                    logger.debug(f"Service checks completed with results for {len(results)} services")
+                    self.data_ready.emit(results)
+                    self.latency_updated.emit()
+                    
+                    # Update status
+                    self.status_message.emit(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    
+                except Exception as e:
+                    logger.error(f"Error in data manager loop: {str(e)}")
+                    self.status_message.emit("Error updating data")
+                
+                # Wait for next check
+                self.msleep(self.check_interval)
+                
+        except Exception as e:
+            logger.error(f"Error in data manager thread: {str(e)}", exc_info=True)
+            self.status_message.emit("Error initializing data")
+    
+    def normalize_latency_data(self):
+        """Normalize latency data format"""
+        if not hasattr(self.service_checker, 'latency_history'):
+            return
+            
+        try:
+            original_structure = copy.deepcopy(self.service_checker.latency_history)
+            
+            for service_name, endpoints in original_structure.items():
+                if not isinstance(endpoints, dict):
+                    self.service_checker.latency_history[service_name] = {}
+                    continue
+                    
+                for endpoint_key, data in endpoints.items():
+                    if not data or not hasattr(data, '__iter__'):
+                        continue
+                    
+                    try:
+                        data_list = list(data)
+                        if not data_list:
+                            continue
+                        
+                        if isinstance(data, collections.deque) and all(
+                            isinstance(item, tuple) and len(item) >= 2 and 
+                            isinstance(item[0], datetime) and isinstance(item[1], (int, float))
+                            for item in data_list
+                        ):
+                            continue
+                        
+                        normalized_data = collections.deque(maxlen=240)
+                        now = datetime.now()
+                        
+                        if all(isinstance(item, (int, float)) for item in data_list):
+                            for i, value in enumerate(reversed(data_list)):
+                                timestamp = now - timedelta(seconds=i * 15)
+                                normalized_data.appendleft((timestamp, float(value)))
+                        elif all(isinstance(item, tuple) and len(item) >= 2 for item in data_list):
+                            for item in data_list:
+                                timestamp = item[0] if isinstance(item[0], datetime) else now
+                                value = float(item[1]) if isinstance(item[1], (int, float)) else 0.0
+                                normalized_data.append((timestamp, value))
+                        
+                        self.service_checker.latency_history[service_name][endpoint_key] = normalized_data
+                        
+                    except Exception as e:
+                        logger.error(f"Error normalizing data for {endpoint_key}: {str(e)}")
+                        
+        except Exception as e:
+            logger.error(f"Error in normalize_latency_data: {str(e)}")
+    
+    def stop(self):
+        """Stop the thread"""
+        self.running = False
+        self.wait()

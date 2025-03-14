@@ -1,78 +1,180 @@
-# Microsoft 365 & Azure Service Status Dashboard
+# M365 Endpoint Analyzer
 
-A Windows desktop application for monitoring Microsoft 365 and Azure service health and connectivity.
+######## CURSOR AGENTIC WORKFLOW POC #####
+Created completely in Cursor using Claude Sonnet 3.5 and 3.7, not a single line of code has been manually inputted or edited. Test project to see the state-of-the-art in LLM based agentic coding workflows.
+#########################################
+
+A powerful desktop application for monitoring and analyzing Microsoft 365 service endpoints. The application provides real-time monitoring of endpoint health, latency tracking, and detailed status information with a modern, dark-themed user interface.
 
 ## Features
 
-- Microsoft 365 Authentication using device code flow
-- Real-time service health monitoring
-- Connectivity testing for Microsoft services
-- Interactive dashboard with status indicators
-- Historical data logging
-- Advanced latency trend analysis with visual graphs and alerts
-  - Overview of HTTPS/443 connectivity for all services
-  - Detailed service-specific latency monitoring
-  - Flexible time window selection (5 min, 15 min, 30 min, 1 hour)
-  - Smart rolling baseline detection (15-minute window)
-    - Uses average min/max values from 5 segments (3 minutes each)
-    - Values can exceed the average range, triggering alerts
-    - Color-coded stability ranges:
-      - Green: stable (<60ms variation)
-      - Orange: variable but stable (60-120ms variation)
-      - Red: unstable (>120ms variation)
-    - Visual stability indicators showing current status
-  - Sophisticated dual-trigger alert system:
-    - Pattern detection: Alerts when 7 out of 10 recent values exceed the average range
-    - Absolute threshold: Alerts when any values exceed 250ms latency  
-    - Clear alert categories with specific messaging
-    - Visual cues including background color changes and labeled alert types
-    - Detailed diagnostic information in pop-up notifications
-  - Absolute threshold line displayed on all graphs for reference
+- Real-time monitoring of Microsoft 365 service endpoints
+- Detailed status information for each endpoint including DNS, HTTP, and TCP checks
+- Interactive latency graphs with historical data
+- Service categorization (Teams, Exchange, SharePoint, etc.)
+- Custom endpoint management
+- Dark theme UI with responsive design
+- Background processing for improved performance
+- Comprehensive logging system
+
+## Installation
+
+1. Clone the repository:
+```bash
+git clone https://github.com/yourusername/365EndpointAnalyzer.git
+cd 365EndpointAnalyzer
+```
+
+2. Create and activate a virtual environment (recommended):
+```bash
+# Windows
+python -m venv venv
+.\venv\Scripts\activate
+
+# Linux/Mac
+python3 -m venv venv
+source venv/bin/activate
+```
+
+3. Install required dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+## Usage
+
+1. Start the application:
+```bash
+python main.py
+```
+
+2. The application will open with three main tabs:
+   - **Service Overview**: High-level status of each service category
+   - **Detailed Status**: Comprehensive endpoint check results
+   - **Latency Trends**: Real-time latency graphs for each endpoint
+
+3. Use the top toolbar to:
+   - Add new endpoints
+   - Remove endpoints or specific ports
+   - Restore from backups
+   - Refresh data manually
+   - Change the time interval for latency graphs
+
+4. Monitor endpoint health through:
+   - Color-coded status indicators
+   - Detailed check information
+   - Interactive latency graphs
+   - Protocol-specific status details
+
+## File Structure
+
+- `main.py`: Application entry point and initialization
+- `gui.py`: Main GUI implementation using PyQt6
+  - Contains window layouts, widgets, and UI logic
+  - Implements real-time data visualization
+  - Handles user interactions and threading
+- `service_checker.py`: Core service checking functionality
+  - Implements endpoint health checks
+  - Manages latency monitoring
+  - Handles protocol-specific checks (DNS, HTTP, TCP)
+- `endpoints.json`: Configuration file for monitored endpoints
+  - Defines service categories
+  - Specifies endpoint properties and check types
+- `utils.py`: Utility functions and helper methods
+- `requirements.txt`: Python package dependencies
+- `logs/`: Directory containing application logs
+  - Automatically rotated and managed
+  - Includes detailed debugging information
+
+## Configuration
+
+### Adding New Endpoints
+
+1. Click the "Add Endpoint" button
+2. Select the service category
+3. Enter the endpoint domain/URL
+4. Configure check types:
+   - DNS Check
+   - HTTP/HTTPS Check
+   - Custom Port Check
+5. Choose between TCP Port Only or Full Protocol Check
+6. Save the configuration
+
+### Removing Endpoints
+
+1. Click the "Remove Endpoint" button
+2. Select a service category from the left panel
+3. Select an endpoint from the category
+4. Choose a removal option:
+   - Remove specific ports (select ports from the list)
+   - Remove the entire endpoint
+   - Remove the entire category
+5. Confirm the removal action
+6. A backup of the current configuration will be automatically created
+
+### Restoring from Backups
+
+1. Click the "Restore Backup" button
+2. Select a backup file from the list (sorted by date, newest first)
+3. Confirm the restoration
+4. The application will create a backup of the current configuration before restoring
+
+### Endpoint Check Types
+
+- **TCP Port Only**: Basic connectivity check
+- **Full Protocol Check**: Complete protocol-specific validation
+- **DNS Check**: Domain resolution and record validation
+- **HTTP/HTTPS**: Complete web request validation
+
+## Development
+
+### Key Components
+
+1. **GUI Layer** (`gui.py`):
+   - PyQt6-based user interface
+   - Real-time data visualization
+   - Event handling and user interaction
+
+2. **Service Layer** (`service_checker.py`):
+   - Endpoint health monitoring
+   - Protocol-specific checks
+   - Latency tracking and history
+
+3. **Data Management**:
+   - Background processing
+   - Thread-safe data handling
+   - Efficient state management
+
+### Threading Model
+
+- Main UI thread for interface responsiveness
+- Background thread for service checks
+- Separate thread for data processing
+- Signal-based communication between threads
+
+## Logging
+
+The application maintains detailed logs in the `logs/` directory:
+- Automatic log rotation
+- Size-based cleanup
+- Comprehensive error tracking
+- Performance monitoring
 
 ## Requirements
 
 - Python 3.8 or higher
-- Windows 10/11
-- Microsoft 365 account with appropriate permissions
+- PyQt6
+- Matplotlib
+- Additional dependencies listed in requirements.txt
 
-## Installation
+## Contributing
 
-1. Clone this repository
-2. Create a virtual environment:
-   ```
-   python -m venv venv
-   .\venv\Scripts\activate
-   ```
-3. Install dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
-
-## Usage
-
-1. Run the application:
-   ```
-   python main.py
-   ```
-
-2. When prompted:
-   - Visit the Microsoft device login page (URL will be displayed)
-   - Enter the code shown in the application
-   - Sign in with your Microsoft 365 account
-   - Grant the requested permissions
-
-After the initial authentication, the application will cache your credentials for future use.
-
-## Development
-
-The project structure is organized as follows:
-- `main.py`: Application entry point
-- `auth.py`: Microsoft authentication handling
-- `service_checker.py`: Service health and connectivity checks
-- `gui.py`: PyQt6-based user interface
-- `config.py`: Configuration management
-- `utils.py`: Helper utilities
+1. Fork the repository
+2. Create a feature branch
+3. Commit your changes
+4. Push to the branch
+5. Create a Pull Request
 
 ## License
 
-MIT License
+This project is licensed under the MIT License - see the LICENSE file for details.

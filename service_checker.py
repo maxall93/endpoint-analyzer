@@ -18,8 +18,22 @@ logger = logging.getLogger(__name__)
 
 class ServiceChecker:
     def __init__(self, endpoints_file="endpoints.json"):
+        # Log the initialization
+        logger.info(f"Initializing ServiceChecker with endpoints file: {endpoints_file}")
+        
         # Load endpoints from JSON file
         self.endpoints = self.load_endpoints(endpoints_file)
+        
+        # Verify endpoints structure
+        if 'categories' in self.endpoints:
+            category_count = len(self.endpoints['categories'])
+            endpoint_count = 0
+            for service_name, service_data in self.endpoints['categories'].items():
+                if isinstance(service_data, dict) and 'endpoints' in service_data:
+                    endpoint_count += len(service_data['endpoints'])
+            logger.info(f"ServiceChecker loaded with {category_count} categories and {endpoint_count} endpoints")
+        else:
+            logger.warning("ServiceChecker loaded but 'categories' not in endpoints structure")
         
         self.results_history = []
         self.max_history = 3600  # Store up to 1 hour of results (at 15s intervals)
@@ -55,31 +69,55 @@ class ServiceChecker:
             # Check if file exists
             if not os.path.exists(endpoints_file):
                 logger.error(f"Endpoints file not found: {endpoints_file}")
-                return {}
+                return {'categories': {}}
                 
             # Load JSON file
             with open(endpoints_file, 'r') as f:
                 data = json.load(f)
                 
-            logger.info(f"Loaded endpoints from {endpoints_file}")
-            logger.debug(f"Endpoint categories: {list(data.get('categories', {}).keys())}")
+            logger.info(f"Successfully loaded JSON from {endpoints_file}")
             
-            # Return the categories section which contains our endpoint structure
-            return data.get('categories', {})
+            # Ensure we have a categories section
+            if 'categories' not in data:
+                logger.warning(f"No 'categories' section found in {endpoints_file}, restructuring data")
+                # If no categories section, assume the whole file is a flat list of services
+                categories = {}
+                for service_name, service_data in data.items():
+                    if isinstance(service_data, dict) and 'endpoints' in service_data:
+                        categories[service_name] = service_data
+                data = {'categories': categories}
             
+            # Validate the structure
+            if 'categories' in data:
+                category_count = len(data['categories'])
+                endpoint_count = 0
+                for service_name, service_data in data['categories'].items():
+                    if isinstance(service_data, dict) and 'endpoints' in service_data:
+                        endpoint_count += len(service_data['endpoints'])
+                logger.info(f"Loaded {category_count} categories with {endpoint_count} endpoints")
+            else:
+                logger.error("Failed to create proper categories structure")
+            
+            return data
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error in {endpoints_file}: {str(e)}")
+            return {'categories': {}}
         except Exception as e:
-            logger.error(f"Error loading endpoints from {endpoints_file}: {str(e)}")
-            return {}
+            logger.error(f"Error loading endpoints from {endpoints_file}: {str(e)}", exc_info=True)
+            return {'categories': {}}
             
     def build_domain_service_map(self):
         """Build a mapping of domains to services for quick lookups"""
         self.domain_service_map = {}
         
-        for service_name, service_data in self.endpoints.items():
-            for endpoint in service_data.get('endpoints', []):
-                domain = endpoint.get('domain', '')
-                if domain:
-                    self.domain_service_map[domain] = service_name
+        if 'categories' in self.endpoints:
+            for service_name, service_data in self.endpoints['categories'].items():
+                if isinstance(service_data, dict) and 'endpoints' in service_data:
+                    for endpoint in service_data['endpoints']:
+                        domain = endpoint.get('domain', '')
+                        if domain:
+                            self.domain_service_map[domain] = service_name
                     
         logger.debug(f"Built domain service map with {len(self.domain_service_map)} entries")
         
@@ -264,14 +302,25 @@ class ServiceChecker:
         results = {}
         
         # Check if we have endpoints loaded
-        if not self.endpoints:
-            logger.error("No endpoints loaded. Cannot run service checks.")
+        if not self.endpoints or 'categories' not in self.endpoints:
+            logger.error("No endpoints loaded or invalid structure. Cannot run service checks.")
+            # Return an empty but valid structure
             return {}
             
-        logger.info(f"Running service checks for {len(self.endpoints)} services")
+        # Check if categories is empty
+        if not self.endpoints['categories']:
+            logger.warning("Categories section is empty. No services to check.")
+            return {}
+            
+        logger.info(f"Running service checks for {len(self.endpoints['categories'])} services")
         
         # Process each service category
-        for service_name, service_data in self.endpoints.items():
+        for service_name, service_data in self.endpoints['categories'].items():
+            # Skip if not a dict or no endpoints
+            if not isinstance(service_data, dict) or 'endpoints' not in service_data or not service_data['endpoints']:
+                logger.warning(f"Skipping service {service_name}: Invalid structure or no endpoints")
+                continue
+                
             logger.info(f"Checking service: {service_name}")
             
             # Initialize results for this service
@@ -281,6 +330,11 @@ class ServiceChecker:
                 'http_checks': []
             }
             
+            # Count how many endpoints are checked for this service
+            endpoint_count = 0
+            port_count = 0
+            http_count = 0
+            
             # Process each endpoint in this service
             for endpoint_data in service_data.get('endpoints', []):
                 domain = endpoint_data.get('domain', '')
@@ -289,6 +343,7 @@ class ServiceChecker:
                     continue
                     
                 logger.info(f"Checking endpoint: {domain}")
+                endpoint_count += 1
                 
                 # DNS resolution check
                 dns_result = self.check_dns_resolution(domain)
@@ -312,6 +367,7 @@ class ServiceChecker:
                         continue
                         
                     logger.info(f"Checking {protocol} port {port} on {domain}")
+                    port_count += 1
                     
                     # Run port check
                     port_result = self.check_port(domain, port, protocol)
@@ -351,6 +407,7 @@ class ServiceChecker:
                             
                         url = f"{protocol.lower()}://{domain}"
                         logger.info(f"Checking HTTP endpoint: {url}")
+                        http_count += 1
                         
                         http_result = self.check_http_endpoint(url, protocol)
                         results[service_name]['http_checks'].append({
@@ -377,9 +434,21 @@ class ServiceChecker:
                             
                             # Update alert status
                             self.update_alert_status(http_endpoint, latency)
+            
+            logger.info(f"Service {service_name}: checked {endpoint_count} endpoints, {port_count} ports, {http_count} HTTP endpoints")
         
         # Save results for history
         self._save_results(results)
+        
+        # Log the results summary
+        service_results = {}
+        for service_name, service_data in results.items():
+            dns_count = len(service_data['dns_checks'])
+            port_count = len(service_data['port_checks'])
+            http_count = len(service_data['http_checks'])
+            service_results[service_name] = f"{dns_count} DNS, {port_count} ports, {http_count} HTTP"
+        
+        logger.info(f"Service check results: {service_results}")
         
         return results
 
@@ -782,12 +851,12 @@ class ServiceChecker:
 
     def _initialize_latency_history(self):
         """Initialize the latency history structure for all services and endpoints"""
-        if not self.endpoints:
-            logger.warning("No endpoints loaded, latency history will be empty")
+        if not self.endpoints or 'categories' not in self.endpoints:
+            logger.warning("No endpoints loaded or invalid structure, latency history will be empty")
             return
             
         # Initialize the structure for each service and endpoint
-        for service_name, service_data in self.endpoints.items():
+        for service_name, service_data in self.endpoints['categories'].items():
             self.latency_history[service_name] = {}
             
             # Process each endpoint in this service
